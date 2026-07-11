@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Notebook</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600;8..60,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+<style>
+  :root{
+    --bg-app:#F5F4F0;
+    --bg-paper:#FFFFFF;
+    --bg-sidebar:#EFEDE7;
+    --ink:#20242A;
+    --ink-soft:#5B6169;
+    --accent:#16324F;
+    --accent-soft:#3D5A78;
+    --gold:#AD8A4E;
+    --border:#DEDAD0;
+    --danger:#A23B2E;
+    --radius:10px;
+  }
+  *{box-sizing:border-box;}
+  html,body{height:100%;}
+  body{
+    margin:0;
+    background:var(--bg-app);
+    color:var(--ink);
+    font-family:'Inter',sans-serif;
+    display:flex;
+    overflow:hidden;
+  }
+
+  /* ---------- Sidebar ---------- */
+  #sidebar{
+    width:260px;
+    min-width:260px;
+    background:var(--bg-sidebar);
+    border-right:1px solid var(--border);
+    display:flex;
+    flex-direction:column;
+    height:100vh;
+    transition:margin-left .25s ease;
+  }
+  #brand{
+    padding:22px 20px 16px 20px;
+    display:flex;
+    align-items:center;
+    gap:10px;
+    border-bottom:1px solid var(--border);
+  }
+  #brand .mark{
+    width:10px;height:22px;
+    background:var(--gold);
+    border-radius:2px;
+    flex-shrink:0;
+  }
+  #brand h1{
+    font-family:'Source Serif 4',serif;
+    font-size:19px;
+    font-weight:600;
+    margin:0;
+    letter-spacing:.2px;
+  }
+  #newNoteBtn{
+    margin:14px 16px 8px 16px;
+    padding:10px 14px;
+    background:var(--accent);
+    color:#fff;
+    border:none;
+    border-radius:var(--radius);
+    font-family:'Inter',sans-serif;
+    font-size:14px;
+    font-weight:600;
+    cursor:pointer;
+    display:flex;
+    align-items:center;
+    gap:8px;
+    justify-content:center;
+  }
+  #newNoteBtn:hover{background:var(--accent-soft);}
+  #noteList{
+    flex:1;
+    overflow-y:auto;
+    padding:6px 10px 16px 10px;
+  }
+  .note-item{
+    padding:10px 12px;
+    border-radius:8px;
+    cursor:pointer;
+    margin-bottom:3px;
+    border-left:3px solid transparent;
+    position:relative;
+  }
+  .note-item:hover{background:rgba(0,0,0,0.04);}
+  .note-item.active{
+    background:var(--bg-paper);
+    border-left:3px solid var(--gold);
+  }
+  .note-title{
+    font-size:14px;
+    font-weight:500;
+    white-space:nowrap;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    padding-right:22px;
+  }
+  .note-date{
+    font-size:11.5px;
+    color:var(--ink-soft);
+    margin-top:2px;
+  }
+  .note-delete{
+    position:absolute;
+    right:8px;
+    top:8px;
+    background:none;
+    border:none;
+    color:var(--ink-soft);
+    cursor:pointer;
+    font-size:15px;
+    display:none;
+    line-height:1;
+    padding:4px;
+  }
+  .note-item:hover .note-delete{display:block;}
+  .note-delete:hover{color:var(--danger);}
+  #emptyState{
+    padding:20px 16px;
+    font-size:13px;
+    color:var(--ink-soft);
+    line-height:1.5;
+  }
+
+  /* ---------- Main ---------- */
+  #main{
+    flex:1;
+    display:flex;
+    flex-direction:column;
+    height:100vh;
+    min-width:0;
+  }
+  #topbar{
+    padding:14px 24px;
+    border-bottom:1px solid var(--border);
+    display:flex;
+    align-items:center;
+    gap:14px;
+    background:var(--bg-app);
+    flex-wrap:wrap;
+  }
+  #menuToggle{
+    display:none;
+    background:none;
+    border:1px solid var(--border);
+    border-radius:8px;
+    width:36px;height:36px;
+    cursor:pointer;
+    font-size:16px;
+    color:var(--ink);
+    flex-shrink:0;
+  }
+  #titleInput{
+    flex:1;
+    min-width:120px;
+    font-family:'Source Serif 4',serif;
+    font-size:22px;
+    font-weight:600;
+    border:none;
+    background:none;
+    outline:none;
+    color:var(--ink);
+  }
+  #titleInput::placeholder{color:#B7B2A6;}
+  .btn{
+    padding:9px 15px;
+    border-radius:8px;
+    border:1px solid var(--border);
+    background:var(--bg-paper);
+    color:var(--ink);
+    font-family:'Inter',sans-serif;
+    font-size:13.5px;
+    font-weight:600;
+    cursor:pointer;
+    white-space:nowrap;
+    display:flex;
+    align-items:center;
+    gap:6px;
+  }
+  .btn:hover{border-color:var(--accent-soft);color:var(--accent);}
+  .btn.primary{
+    background:var(--accent);
+    color:#fff;
+    border-color:var(--accent);
+  }
+  .btn.primary:hover{background:var(--accent-soft);border-color:var(--accent-soft);color:#fff;}
+  #saveStatus{
+    font-size:12px;
+    color:var(--ink-soft);
+    margin-left:2px;
+  }
+
+  /* view toggle for mobile */
+  #viewToggle{display:none;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;}
+  #viewToggle button{
+    border:none;background:var(--bg-paper);padding:8px 14px;font-size:13px;font-weight:600;
+    color:var(--ink-soft);cursor:pointer;font-family:'Inter',sans-serif;
+  }
+  #viewToggle button.active{background:var(--accent);color:#fff;}
+
+  #toolbar{
+    padding:8px 24px;
+    display:flex;
+    gap:6px;
+    border-bottom:1px solid var(--border);
+    flex-wrap:wrap;
+  }
+  #toolbar button{
+    background:var(--bg-sidebar);
+    border:1px solid var(--border);
+    color:var(--ink);
+    border-radius:6px;
+    width:32px;height:32px;
+    font-family:'Source Serif 4',serif;
+    font-size:14px;
+    cursor:pointer;
+  }
+  #toolbar button:hover{background:var(--border);}
+
+  #workspace{
+    flex:1;
+    display:flex;
+    overflow:hidden;
+  }
+  #editorPane, #previewPane{
+    flex:1;
+    overflow-y:auto;
+    height:100%;
+  }
+  #editorPane{
+    border-right:1px solid var(--border);
+  }
+  #editor{
+    width:100%;
+    height:100%;
+    border:none;
+    outline:none;
+    resize:none;
+    padding:26px 32px;
+    font-family:'JetBrains Mono',monospace;
+    font-size:14.5px;
+    line-height:1.7;
+    color:var(--ink);
+    background:var(--bg-paper);
+  }
+  #previewPane{background:var(--bg-paper);}
+  #preview{
+    max-width:720px;
+    margin:0 auto;
+    padding:32px 40px 80px 40px;
+    font-family:'Source Serif 4',serif;
+    font-size:16.5px;
+    line-height:1.75;
+    color:var(--ink);
+  }
+  #preview h1,#preview h2,#preview h3{
+    font-family:'Source Serif 4',serif;
+    font-weight:700;
+    color:var(--accent);
+    line-height:1.3;
+  }
+  #preview h1{font-size:30px;border-bottom:1px solid var(--border);padding-bottom:10px;margin-top:0;}
+  #preview h2{font-size:23px;margin-top:34px;}
+  #preview h3{font-size:19px;margin-top:26px;}
+  #preview p{margin:14px 0;}
+  #preview code{
+    font-family:'JetBrains Mono',monospace;
+    background:var(--bg-sidebar);
+    padding:2px 6px;
+    border-radius:4px;
+    font-size:14px;
+  }
+  #preview pre{
+    background:#1E232B;
+    color:#EAEAEA;
+    padding:16px 18px;
+    border-radius:8px;
+    overflow-x:auto;
+  }
+  #preview pre code{background:none;color:inherit;padding:0;}
+  #preview blockquote{
+    border-left:3px solid var(--gold);
+    margin:16px 0;
+    padding:2px 18px;
+    color:var(--ink-soft);
+    font-style:italic;
+  }
+  #preview table{border-collapse:collapse;width:100%;margin:18px 0;font-size:15px;}
+  #preview th,#preview td{border:1px solid var(--border);padding:8px 12px;text-align:left;}
+  #preview th{background:var(--bg-sidebar);font-family:'Inter',sans-serif;}
+  #preview ul,#preview ol{padding-left:24px;}
+  #preview li{margin:6px 0;}
+  #preview hr{border:none;border-top:1px solid var(--border);margin:28px 0;}
+  #preview img{max-width:100%;border-radius:6px;}
+  #preview a{color:var(--accent);}
+
+  #dropOverlay{
+    display:none;
+    align-items:center;
+    justify-content:center;
+    flex-direction:column;
+    gap:10px;
+    height:100%;
+    color:var(--ink-soft);
+    font-family:'Source Serif 4',serif;
+    font-size:20px;
+    text-align:center;
+  }
+
+  /* ---------- Mobile ---------- */
+  @media (max-width:820px){
+    #sidebar{
+      position:fixed;
+      z-index:20;
+      margin-left:-260px;
+      box-shadow:2px 0 20px rgba(0,0,0,0.15);
+    }
+    #sidebar.open{margin-left:0;}
+    #menuToggle{display:block;}
+    #viewToggle{display:flex;}
+    #editorPane, #previewPane{width:100%;}
+    #editorPane{display:block;border-right:none;}
+    #previewPane{display:none;}
+    #workspace.show-preview #editorPane{display:none;}
+    #workspace.show-preview #previewPane{display:block;}
+    #preview{padding:22px 20px 60px 20px;}
+    #editor{padding:20px;}
+    #titleInput{font-size:19px;}
+    #scrim{
+      display:none;
+      position:fixed;inset:0;background:rgba(0,0,0,0.3);z-index:15;
+    }
+    #scrim.show{display:block;}
+  }
+</style>
+</head>
+<body>
+
+<div id="scrim" onclick="closeSidebar()"></div>
+
+<div id="sidebar">
+  <div id="brand">
+    <div class="mark"></div>
+    <h1>Notebook</h1>
+  </div>
+  <button id="newNoteBtn" onclick="createNote()">+ New note</button>
+  <div id="noteList"></div>
+</div>
+
+<div id="main">
+  <div id="topbar">
+    <button id="menuToggle" onclick="toggleSidebar()">☰</button>
+    <input id="titleInput" placeholder="Untitled note" oninput="onTitleInput()">
+    <span id="saveStatus"></span>
+    <div id="viewToggle">
+      <button id="viewWrite" class="active" onclick="setMobileView('write')">Write</button>
+      <button id="viewRead" onclick="setMobileView('read')">Preview</button>
+    </div>
+    <button class="btn" onclick="downloadMd()">↓ .md</button>
+    <button class="btn primary" onclick="exportPdf()">Export PDF</button>
+  </div>
+
+  <div id="toolbar">
+    <button title="Bold" onclick="wrap('**','**')"><b>B</b></button>
+    <button title="Italic" onclick="wrap('_','_')"><i>i</i></button>
+    <button title="Heading" onclick="linePrefix('## ')">H</button>
+    <button title="Bullet list" onclick="linePrefix('- ')">•</button>
+    <button title="Numbered list" onclick="linePrefix('1. ')">1.</button>
+    <button title="Code" onclick="wrap('`','`')">&lt;/&gt;</button>
+    <button title="Quote" onclick="linePrefix('> ')">"</button>
+    <button title="Link" onclick="wrap('[',']()')">🔗</button>
+  </div>
+
+  <div id="workspace">
+    <div id="editorPane">
+      <textarea id="editor" placeholder="Start writing in Markdown…" oninput="onEditorInput()"></textarea>
+    </div>
+    <div id="previewPane">
+      <div id="preview"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const STORE_KEY = 'notebook_notes_v1';
+const ACTIVE_KEY = 'notebook_active_v1';
+let notes = [];
+let activeId = null;
+let saveTimer = null;
+
+function uid(){ return 'n' + Date.now() + Math.random().toString(36).slice(2,7); }
+
+function loadAll(){
+  try{
+    const raw = localStorage.getItem(STORE_KEY);
+    notes = raw ? JSON.parse(raw) : [];
+  }catch(e){ notes = []; }
+}
+
+function persist(){
+  try{
+    localStorage.setItem(STORE_KEY, JSON.stringify(notes));
+    localStorage.setItem(ACTIVE_KEY, activeId || '');
+  }catch(e){
+    console.error('Storage error', e);
+    document.getElementById('saveStatus').textContent = 'Storage full — export your notes';
+  }
+}
+
+function fmtDate(ts){
+  const d = new Date(ts);
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ' · ' +
+         d.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+
+function renderList(){
+  const list = document.getElementById('noteList');
+  if(notes.length === 0){
+    list.innerHTML = '<div id="emptyState">No notes yet. Tap "+ New note" to start writing.</div>';
+    return;
+  }
+  const sorted = [...notes].sort((a,b)=> b.updated - a.updated);
+  list.innerHTML = sorted.map(n => `
+    <div class="note-item ${n.id===activeId?'active':''}" onclick="selectNote('${n.id}')">
+      <div class="note-title">${escapeHtml(n.title || 'Untitled note')}</div>
+      <div class="note-date">${fmtDate(n.updated)}</div>
+      <button class="note-delete" onclick="event.stopPropagation(); deleteNote('${n.id}')">✕</button>
+    </div>
+  `).join('');
+}
+
+function escapeHtml(s){
+  return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+
+function createNote(){
+  const n = { id: uid(), title:'', content:'', updated: Date.now() };
+  notes.push(n);
+  activeId = n.id;
+  persist();
+  renderList();
+  loadIntoEditor(n);
+  document.getElementById('titleInput').focus();
+  if(window.innerWidth <= 820) closeSidebar();
+}
+
+function selectNote(id){
+  const n = notes.find(x=>x.id===id);
+  if(!n) return;
+  activeId = id;
+  persist();
+  renderList();
+  loadIntoEditor(n);
+  if(window.innerWidth <= 820) closeSidebar();
+}
+
+function deleteNote(id){
+  if(!confirm('Delete this note? This cannot be undone.')) return;
+  notes = notes.filter(n=>n.id!==id);
+  if(activeId === id){
+    activeId = notes.length ? [...notes].sort((a,b)=>b.updated-a.updated)[0].id : null;
+  }
+  persist();
+  renderList();
+  if(activeId){
+    loadIntoEditor(notes.find(n=>n.id===activeId));
+  }else{
+    document.getElementById('titleInput').value='';
+    document.getElementById('editor').value='';
+    updatePreview();
+  }
+}
+
+function loadIntoEditor(n){
+  document.getElementById('titleInput').value = n.title || '';
+  document.getElementById('editor').value = n.content || '';
+  updatePreview();
+}
+
+function currentNote(){
+  return notes.find(n=>n.id===activeId);
+}
+
+function onTitleInput(){
+  const n = currentNote();
+  if(!n) return;
+  n.title = document.getElementById('titleInput').value;
+  n.updated = Date.now();
+  scheduleSave();
+}
+
+function onEditorInput(){
+  const n = currentNote();
+  if(!n) return;
+  n.content = document.getElementById('editor').value;
+  n.updated = Date.now();
+  updatePreview();
+  scheduleSave();
+}
+
+function scheduleSave(){
+  document.getElementById('saveStatus').textContent = 'Saving…';
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(()=>{
+    persist();
+    renderList();
+    document.getElementById('saveStatus').textContent = 'Saved';
+    setTimeout(()=>{ document.getElementById('saveStatus').textContent=''; }, 1500);
+  }, 400);
+}
+
+function updatePreview(){
+  const md = document.getElementById('editor').value;
+  document.getElementById('preview').innerHTML = md.trim()
+    ? marked.parse(md)
+    : '<p style="color:#B7B2A6;">Nothing to preview yet.</p>';
+}
+
+/* --- toolbar helpers --- */
+function wrap(before, after){
+  const ta = document.getElementById('editor');
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  const val = ta.value;
+  const selected = val.slice(s,e) || 'text';
+  ta.value = val.slice(0,s) + before + selected + after + val.slice(e);
+  ta.focus();
+  ta.selectionStart = s + before.length;
+  ta.selectionEnd = s + before.length + selected.length;
+  onEditorInput();
+}
+function linePrefix(prefix){
+  const ta = document.getElementById('editor');
+  const s = ta.selectionStart;
+  const val = ta.value;
+  const lineStart = val.lastIndexOf('\n', s-1) + 1;
+  ta.value = val.slice(0,lineStart) + prefix + val.slice(lineStart);
+  ta.focus();
+  ta.selectionStart = ta.selectionEnd = s + prefix.length;
+  onEditorInput();
+}
+
+/* --- sidebar / mobile view --- */
+function toggleSidebar(){
+  document.getElementById('sidebar').classList.toggle('open');
+  document.getElementById('scrim').classList.toggle('show');
+}
+function closeSidebar(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('scrim').classList.remove('show');
+}
+function setMobileView(mode){
+  const ws = document.getElementById('workspace');
+  const w = document.getElementById('viewWrite');
+  const r = document.getElementById('viewRead');
+  if(mode==='read'){
+    ws.classList.add('show-preview');
+    w.classList.remove('active'); r.classList.add('active');
+  }else{
+    ws.classList.remove('show-preview');
+    r.classList.remove('active'); w.classList.add('active');
+  }
+}
+
+/* --- export --- */
+function downloadMd(){
+  const n = currentNote();
+  if(!n) return;
+  const blob = new Blob([n.content||''], {type:'text/markdown'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (n.title || 'untitled') + '.md';
+  a.click();
+}
+
+function exportPdf(){
+  const n = currentNote();
+  if(!n) return;
+  const el = document.getElementById('preview').cloneNode(true);
+  el.style.maxWidth = '680px';
+  const filename = (n.title || 'untitled').replace(/[^\w\- ]/g,'').trim() + '.pdf';
+  const opt = {
+    margin:       [15,15,15,15],
+    filename:     filename,
+    image:        { type:'jpeg', quality:0.98 },
+    html2canvas:  { scale:2, useCORS:true },
+    jsPDF:        { unit:'mm', format:'a4', orientation:'portrait' },
+    pagebreak:    { mode:['avoid-all','css','legacy'] }
+  };
+  document.getElementById('saveStatus').textContent = 'Preparing PDF…';
+  html2pdf().set(opt).from(el).save().then(()=>{
+    document.getElementById('saveStatus').textContent = '';
+  });
+}
+
+/* --- init --- */
+function init(){
+  loadAll();
+  activeId = localStorage.getItem(ACTIVE_KEY) || null;
+  if(!notes.find(n=>n.id===activeId)){
+    activeId = notes.length ? [...notes].sort((a,b)=>b.updated-a.updated)[0].id : null;
+  }
+  renderList();
+  if(activeId){
+    loadIntoEditor(currentNote());
+  }else if(notes.length===0){
+    createNote();
+  }
+}
+init();
+</script>
+</body>
+</html>
