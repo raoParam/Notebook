@@ -140,9 +140,12 @@ html, body {
     gap: 8px;
 }
 
-#menu-toggle,
 #theme-toggle {
     display: none;
+}
+
+#menu-toggle {
+    display: block;
     background: none;
     border: none;
     cursor: pointer;
@@ -1020,9 +1023,14 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
 
 @media (min-width: 821px) {
     #sidebar {
-        position: static;
-        transform: none;
-        box-shadow: none;
+        transition: width 0.2s ease, min-width 0.2s ease;
+    }
+
+    #sidebar.collapsed {
+        width: 0;
+        min-width: 0;
+        overflow: hidden;
+        border-right: none;
     }
 
     #sidebar-overlay,
@@ -1932,6 +1940,7 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
 
     menuBtn.addEventListener('click', () => {
         sidebar.classList.toggle('open');
+        sidebar.classList.toggle('collapsed');
         overlay.classList.toggle('open');
     });
 
