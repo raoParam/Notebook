@@ -4,6 +4,18 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Notebook</title>
+<script>
+(function () {
+    try {
+        const stored = localStorage.getItem('notebook_theme');
+        const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+        const theme = stored === 'dark' || stored === 'light' ? stored : (prefersDark ? 'dark' : 'light');
+        document.documentElement.dataset.theme = theme;
+    } catch (e) {
+        document.documentElement.dataset.theme = 'light';
+    }
+})();
+</script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js">
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js">
@@ -52,6 +64,42 @@
     --serif-font: 'Source Serif 4', serif;
 }
 
+html[data-theme="dark"] {
+    --bg-app: #14171C;
+    --bg-paper: #1B1F26;
+    --bg-sidebar: #101317;
+    --ink: #E7E5DE;
+    --ink-soft: #9BA1AA;
+    --text-muted: #6E747C;
+    --accent: #7FA8CC;
+    --accent-soft: #9CC0E0;
+    --gold: #D4AF6A;
+    --border: #2A2F37;
+    --danger: #E0796A;
+    --danger-hover: #F0968A;
+    --hover: #22262E;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+    --shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+}
+
+html {
+    color-scheme: light;
+}
+
+html[data-theme="dark"] {
+    color-scheme: dark;
+}
+
+::selection {
+    background: rgba(173, 138, 78, 0.24);
+    color: var(--ink);
+}
+
+html[data-theme="dark"] ::selection {
+    background: rgba(127, 168, 204, 0.35);
+    color: var(--ink);
+}
+
 html, body {
     height: 100%;
     overflow: hidden;
@@ -92,7 +140,8 @@ html, body {
     gap: 8px;
 }
 
-#menu-toggle {
+#menu-toggle,
+#theme-toggle {
     display: none;
     background: none;
     border: none;
@@ -102,11 +151,14 @@ html, body {
     color: var(--text-secondary);
 }
 
-#menu-toggle:hover {
+#menu-toggle:hover,
+#theme-toggle:hover {
     background: var(--hover);
+    color: var(--accent);
 }
 
-#menu-toggle svg {
+#menu-toggle svg,
+#theme-toggle svg {
     display: block;
 }
 
@@ -115,6 +167,15 @@ html, body {
     color: var(--text-muted);
     margin-left: auto;
     white-space: nowrap;
+}
+
+#theme-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
 }
 
 /* Main Layout */
@@ -243,6 +304,10 @@ html, body {
     background: rgba(162, 59, 46, 0.10);
 }
 
+html[data-theme="dark"] .note-delete:hover {
+    background: rgba(224, 121, 106, 0.14);
+}
+
 .note-delete svg {
     display: block;
 }
@@ -321,6 +386,7 @@ html, body {
 
 #note-title::placeholder {
     color: var(--text-muted);
+    opacity: 1;
 }
 
 /* Toolbar */
@@ -363,6 +429,10 @@ html, body {
 
 .toolbar-btn:active {
     background: #D6D0C4;
+}
+
+html[data-theme="dark"] .toolbar-btn:active {
+    background: var(--hover);
 }
 
 .toolbar-btn.bold-btn { font-weight: 700; font-size: 15px; }
@@ -424,6 +494,12 @@ html, body {
 
 .draw-field input[type="range"] {
     width: 92px;
+}
+
+.action-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #FFFFFF;
 }
 
 #drawing-canvas-wrap {
@@ -547,6 +623,7 @@ html, body {
 
 #markdown-input::placeholder {
     color: var(--text-muted);
+    opacity: 1;
 }
 
 #preview {
@@ -592,6 +669,7 @@ html, body {
 
 #preview code {
     background: var(--bg-sidebar);
+    color: var(--ink);
     padding: 2px 6px;
     border-radius: var(--radius-sm);
     font-size: 0.875em;
@@ -608,12 +686,22 @@ html, body {
     border: 1px solid #1E232B;
 }
 
+html[data-theme="dark"] #preview pre {
+    background: #262B33;
+    color: var(--ink);
+    border-color: var(--border);
+}
+
 #preview pre code {
     background: transparent;
     color: #EAEAEA;
     padding: 0;
     font-size: 13px;
     line-height: 1.5;
+}
+
+html[data-theme="dark"] #preview pre code {
+    color: var(--ink);
 }
 
 #preview blockquote {
@@ -728,6 +816,10 @@ html, body {
     z-index: 10;
 }
 
+html[data-theme="dark"] #sidebar-overlay {
+    background: rgba(0, 0, 0, 0.55);
+}
+
 #sidebar-overlay.open {
     display: block;
 }
@@ -749,6 +841,21 @@ html, body {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--gold);
+}
+
+html[data-theme="dark"] ::-webkit-scrollbar-thumb {
+    background: #3A3F47;
+}
+
+html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
+    background: var(--gold);
+}
+
+.notes-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 13px;
 }
 
 /* Responsive: Mobile */
@@ -945,6 +1052,7 @@ html, body {
         </button>
         <h1>Notebook</h1>
         <span id="header-subtitle"></span>
+        <button id="theme-toggle" type="button" aria-label="Switch to dark theme" title="Switch to dark theme"></button>
     </header>
     <div id="main">
         <div id="sidebar-overlay"></div>
@@ -1010,6 +1118,10 @@ html, body {
                             <span>Size</span>
                             <input id="draw-size" type="range" min="1" max="24" value="4">
                         </label>
+                        <button class="action-btn" id="draw-eraser" type="button" aria-pressed="false">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 21H8"/><path d="M5.5 16.5 3 14l9-9a2.121 2.121 0 0 1 3 0l4 4a2.121 2.121 0 0 1 0 3l-7.5 7.5"/><path d="m14 7 3 3"/><path d="M8 20h4l7-7"/></svg>
+                            Eraser
+                        </button>
                         <button class="action-btn" id="draw-clear" type="button">Clear</button>
                         <button class="action-btn" id="draw-insert" type="button">Insert Drawing</button>
                         <button class="action-btn" id="draw-close" type="button">Close</button>
@@ -1060,6 +1172,7 @@ html, body {
     });
 
     const STORAGE_KEY = 'notebook-data';
+    const THEME_STORAGE_KEY = 'notebook_theme';
 
     let state = {
         notes: [],
@@ -1084,6 +1197,7 @@ html, body {
     const writePane = $('#write-pane');
     const previewPane = $('#preview-pane');
     const headerSub = $('#header-subtitle');
+    const themeBtn = $('#theme-toggle');
     const overlay = $('#sidebar-overlay');
     const menuBtn = $('#menu-toggle');
     const toolbar = $('#toolbar');
@@ -1092,6 +1206,7 @@ html, body {
     const drawingCanvas = $('#drawing-canvas');
     const drawColor = $('#draw-color');
     const drawSize = $('#draw-size');
+    const drawEraser = $('#draw-eraser');
     const drawClear = $('#draw-clear');
     const drawInsert = $('#draw-insert');
     const drawClose = $('#draw-close');
@@ -1101,6 +1216,41 @@ html, body {
     let drawingActive = false;
     let drawingPointerId = null;
     let drawingHasMarks = false;
+    let drawingMode = 'pen';
+
+    const themeIcons = {
+        light: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
+        dark: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a6.364 6.364 0 0 0 9 9 9 9 0 1 1-9-9z"/></svg>'
+    };
+
+    function currentTheme() {
+        return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+    }
+
+    function setTheme(theme, persist) {
+        const nextTheme = theme === 'dark' ? 'dark' : 'light';
+        document.documentElement.dataset.theme = nextTheme;
+
+        if (persist) {
+            try {
+                localStorage.setItem(THEME_STORAGE_KEY, nextTheme);
+            } catch (e) {}
+        }
+
+        updateThemeButton();
+    }
+
+    function updateThemeButton() {
+        const activeTheme = currentTheme();
+        const nextTheme = activeTheme === 'dark' ? 'light' : 'dark';
+        themeBtn.innerHTML = themeIcons[activeTheme];
+        themeBtn.setAttribute('aria-label', 'Switch to ' + nextTheme + ' theme');
+        themeBtn.setAttribute('title', 'Switch to ' + nextTheme + ' theme');
+    }
+
+    function toggleTheme() {
+        setTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
+    }
 
     function uid() {
         return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -1180,7 +1330,7 @@ html, body {
         const active = getActive();
 
         if (state.notes.length === 0) {
-            notesList.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-muted);font-size:13px;">No notes yet. Create one!</div>';
+            notesList.innerHTML = '<div class="notes-empty">No notes yet. Create one!</div>';
             return;
         }
 
@@ -1583,8 +1733,9 @@ html, body {
     function draw(e) {
         if (!drawingActive || e.pointerId !== drawingPointerId || !drawingCtx) return;
         const pos = pointerPosition(e);
-        drawingCtx.strokeStyle = drawColor.value;
-        drawingCtx.lineWidth = Number(drawSize.value);
+        const size = Number(drawSize.value);
+        drawingCtx.strokeStyle = drawingMode === 'eraser' ? '#ffffff' : drawColor.value;
+        drawingCtx.lineWidth = drawingMode === 'eraser' ? Math.max(8, size * 2) : size;
         drawingCtx.lineTo(pos.x, pos.y);
         drawingCtx.stroke();
         e.preventDefault();
@@ -1604,6 +1755,14 @@ html, body {
         drawingCtx.fillStyle = '#ffffff';
         drawingCtx.fillRect(0, 0, rect.width, rect.height);
         drawingHasMarks = false;
+    }
+
+    function setDrawingMode(mode) {
+        drawingMode = mode === 'eraser' ? 'eraser' : 'pen';
+        const erasing = drawingMode === 'eraser';
+        drawEraser.classList.toggle('active', erasing);
+        drawEraser.setAttribute('aria-pressed', erasing ? 'true' : 'false');
+        drawingCanvas.style.cursor = erasing ? 'cell' : 'crosshair';
     }
 
     function insertDrawing() {
@@ -1769,6 +1928,8 @@ html, body {
     }
 
     /* Event listeners */
+    themeBtn.addEventListener('click', toggleTheme);
+
     menuBtn.addEventListener('click', () => {
         sidebar.classList.toggle('open');
         overlay.classList.toggle('open');
@@ -1796,6 +1957,7 @@ html, body {
     drawingCanvas.addEventListener('pointermove', draw);
     drawingCanvas.addEventListener('pointerup', stopDrawing);
     drawingCanvas.addEventListener('pointercancel', stopDrawing);
+    drawEraser.addEventListener('click', () => setDrawingMode(drawingMode === 'eraser' ? 'pen' : 'eraser'));
     drawClear.addEventListener('click', clearDrawing);
     drawInsert.addEventListener('click', insertDrawing);
     drawClose.addEventListener('click', () => setDrawingPanel(false));
@@ -1852,6 +2014,8 @@ html, body {
     });
 
     /* Init */
+    setTheme(currentTheme(), false);
+    setDrawingMode('pen');
     load();
     state.mobilePreview = false;
     render();
