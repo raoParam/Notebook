@@ -20,6 +20,9 @@
 </script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js">
 </script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js">
+</script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:wght@400;600;700&display=swap');
 
@@ -1140,6 +1143,7 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
                     </button>
                 </div>
                 <input id="image-upload" type="file" accept="image/*">
+                <input id="open-md-input" type="file" accept=".md,.markdown">
                 <div id="drawing-panel" aria-hidden="true">
                     <div id="drawing-tools">
                         <label class="draw-field" title="Pen color">
@@ -1181,6 +1185,9 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
                     </div>
                 </div>
                 <div id="actions">
+                    <button class="action-btn" id="open-md" title="Open .md file">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    </button>
                     <button class="action-btn" id="export-pdf">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
                         Export PDF
@@ -1235,6 +1242,8 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
     const menuBtn = $('#menu-toggle');
     const toolbar = $('#toolbar');
     const imageUpload = $('#image-upload');
+    const openMdBtn = $('#open-md');
+    const openMdInput = $('#open-md-input');
     const drawingPanel = $('#drawing-panel');
     const drawingCanvas = $('#drawing-canvas');
     const drawColor = $('#draw-color');
@@ -1447,12 +1456,51 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
         updateMobileTabs();
     }
 
+    function transformRegexExpressions(content) {
+        return content.replace(/(?<!\w)\/((?:[^\n\/\\]|\\.)+)\/[gimsuy]*/g, '`$&`');
+    }
+
+    function renderMathExpressions(content) {
+        const blocks = [];
+
+        content = content.replace(/\$\$([\s\S]+?)\$\$/g, (_, math) => {
+            const id = `MATH_B_${blocks.length}`;
+            blocks.push({ id, math: math.trim(), display: true });
+            return id;
+        });
+
+        content = content.replace(/\$(?!\s)([^$]*?\S)\$/g, (_, math) => {
+            const id = `MATH_I_${blocks.length}`;
+            blocks.push({ id, math: math.trim(), display: false });
+            return id;
+        });
+
+        content = transformRegexExpressions(content);
+
+        let html = marked.parse(content);
+
+        for (const { id, math, display } of blocks) {
+            try {
+                const rendered = katex.renderToString(math, {
+                    displayMode: display,
+                    throwOnError: false
+                });
+                html = html.replace(id, rendered);
+            } catch (e) {
+                html = html.replace(id, `<code>${escapeHtml(math)}</code>`);
+            }
+        }
+
+        return html;
+    }
+
     function updatePreview() {
         const active = getActive();
         if (!active) return;
 
         if (active.content.trim()) {
-            preview.innerHTML = marked.parse(resolveAttachmentImages(active, active.content));
+            const resolved = resolveAttachmentImages(active, active.content);
+            preview.innerHTML = renderMathExpressions(resolved);
         } else {
             preview.innerHTML = '<p id="preview-empty">Nothing to preview</p>';
         }
@@ -2003,6 +2051,42 @@ html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
     });
 
     imageUpload.addEventListener('change', handleImageUpload);
+
+    openMdBtn.addEventListener('click', () => openMdInput.click());
+
+    openMdInput.addEventListener('change', function () {
+        const file = this.files && this.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onload = function (e) {
+            const content = e.target.result;
+            const name = file.name.replace(/\.(md|markdown)$/i, '').trim() || 'Untitled';
+
+            const note = {
+                id: uid(),
+                title: name,
+                content: content,
+                attachments: {},
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString()
+            };
+            state.notes.push(note);
+            state.activeId = note.id;
+            state.mobilePreview = false;
+            save();
+            render();
+            closeSidebar();
+            setTimeout(() => noteTitle.focus(), 50);
+        };
+        reader.onerror = function () {
+            alert('Could not read the file. Please try again.');
+        };
+        reader.readAsText(file);
+
+        this.value = '';
+    });
+
     drawingCanvas.addEventListener('pointerdown', startDrawing);
     drawingCanvas.addEventListener('pointermove', draw);
     drawingCanvas.addEventListener('pointerup', stopDrawing);
