@@ -26,10 +26,22 @@ export type SyncStatus =
 
 const APP_ID = 'notebook-p2p-sync-v1';
 
+const STUN_SERVERS: RTCConfiguration = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+    { urls: 'stun:stun4.l.google.com:19302' },
+    { urls: 'stun:global.stun.twilio.com:3478' },
+  ],
+};
+
 const RELAY_URLS = [
   'wss://tracker.openwebtorrent.com',
   'wss://tracker.webtorrent.dev',
   'wss://tracker.files.fm:7073/announce',
+  'wss://tracker.btorrent.xyz',
 ];
 
 interface TrysteroAction {
@@ -45,7 +57,10 @@ interface TrysteroRoom {
 }
 
 interface TrysteroModule {
-  joinRoom: (config: { appId: string; relayUrls?: string[] }, roomId: string) => TrysteroRoom;
+  joinRoom: (
+    config: { appId: string; relayUrls?: string[]; rtcConfig?: RTCConfiguration },
+    roomId: string
+  ) => TrysteroRoom;
 }
 
 async function getTrystero(): Promise<TrysteroModule> {
@@ -80,7 +95,14 @@ export function useSync(onNotesChanged: () => void) {
 
     try {
       const trystero = await getTrystero();
-      const room = trystero.joinRoom({ appId: APP_ID, relayUrls: RELAY_URLS }, pairing.id);
+      const room = trystero.joinRoom(
+        {
+          appId: APP_ID,
+          relayUrls: RELAY_URLS,
+          rtcConfig: STUN_SERVERS,
+        },
+        pairing.id
+      );
       const syncAction = room.makeAction('sync');
 
       const sendData = (data: unknown, targetPeerId?: string) => {

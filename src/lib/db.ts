@@ -66,7 +66,7 @@ Happy note-taking!`;
     const contentHash = await computeContentHash(content, attachments);
 
     await db.notes.add({
-      id: crypto.randomUUID(),
+      id: 'welcome-note-default-id',
       title: 'Welcome to Notebook',
       content,
       attachments,
