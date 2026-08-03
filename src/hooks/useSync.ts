@@ -10,6 +10,7 @@ import {
   type ManifestEntry,
 } from '@/lib/sync';
 import { computeContentHash } from '@/lib/hash';
+import { getIceServers, type IceServer } from '@/lib/turn';
 
 export type PeerState = {
   pairingId: string;
@@ -26,27 +27,9 @@ export type SyncStatus =
 
 const APP_ID = 'notebook-p2p-sync-v1';
 
-const STUN_SERVERS: RTCConfiguration = {
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-    { urls: 'stun:stun4.l.google.com:19302' },
-    { urls: 'stun:global.stun.twilio.com:3478' },
-  ],
-};
-
-const RELAY_URLS = [
-  'wss://tracker.openwebtorrent.com',
-  'wss://tracker.webtorrent.dev',
-  'wss://tracker.files.fm:7073/announce',
-  'wss://tracker.btorrent.xyz',
-];
-
 interface TrysteroAction {
   send: (data: unknown, options?: { target?: string | string[] }) => Promise<void>;
-  onMessage: ((data: unknown, context: { peerId: string }) => void | Promise<void>) | null;
+  onMessage: ((data: unknown, context: { peerId: string }) => void) | null;
 }
 
 interface TrysteroRoom {
@@ -58,7 +41,7 @@ interface TrysteroRoom {
 
 interface TrysteroModule {
   joinRoom: (
-    config: { appId: string; relayUrls?: string[]; rtcConfig?: RTCConfiguration },
+    config: { appId: string; turnConfig?: IceServer[] },
     roomId: string
   ) => TrysteroRoom;
 }
@@ -94,12 +77,12 @@ export function useSync(onNotesChanged: () => void) {
     if (roomsRef.current.has(pairing.id)) return;
 
     try {
+      const iceServers = await getIceServers();
       const trystero = await getTrystero();
       const room = trystero.joinRoom(
         {
           appId: APP_ID,
-          relayUrls: RELAY_URLS,
-          rtcConfig: STUN_SERVERS,
+          turnConfig: iceServers,
         },
         pairing.id
       );
@@ -127,58 +110,61 @@ export function useSync(onNotesChanged: () => void) {
       };
 
       // Handle incoming sync messages
-      syncAction.onMessage = async (data: unknown, { peerId }: { peerId: string }) => {
-        if (typeof data !== 'object' || data === null) return;
-        const msg = data as Record<string, unknown>;
+      // NOTE: onMessage must NOT be async directly to avoid message channel closing warnings
+      syncAction.onMessage = (data: unknown, { peerId }: { peerId: string }) => {
+        void (async () => {
+          if (typeof data !== 'object' || data === null) return;
+          const msg = data as Record<string, unknown>;
 
-        // Phase 1: Peer sends manifest → compute what WE need + what PEER needs
-        if (msg.type === 'manifest') {
-          const peerManifest = msg.entries as ManifestEntry[];
-          const localManifest = await buildLocalManifest(db);
+          // Phase 1: Peer sends manifest → compute what WE need + what PEER needs
+          if (msg.type === 'manifest') {
+            const peerManifest = msg.entries as ManifestEntry[];
+            const localManifest = await buildLocalManifest(db);
 
-          // What we need from peer
-          const toRequest = computeDiff(localManifest, peerManifest);
-          sendData({ type: 'request', noteIds: toRequest }, peerId);
+            // What we need from peer
+            const toRequest = computeDiff(localManifest, peerManifest);
+            sendData({ type: 'request', noteIds: toRequest }, peerId);
 
-          // What peer needs from us
-          const peerNeeds = computeDiff(peerManifest, localManifest);
-          for (const noteId of peerNeeds) {
-            const note = await db.notes.get(noteId);
-            if (note) {
-              const compressed = await compressNote(note);
-              sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+            // What peer needs from us
+            const peerNeeds = computeDiff(peerManifest, localManifest);
+            for (const noteId of peerNeeds) {
+              const note = await db.notes.get(noteId);
+              if (note) {
+                const compressed = await compressNote(note);
+                sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+              }
+            }
+            sendData({ type: 'done' }, peerId);
+          }
+
+          // Phase 2: Peer requests specific notes from us
+          if (msg.type === 'request') {
+            const noteIds = msg.noteIds as string[];
+            for (const noteId of noteIds) {
+              const note = await db.notes.get(noteId);
+              if (note) {
+                const compressed = await compressNote(note);
+                sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+              }
             }
           }
-          sendData({ type: 'done' }, peerId);
-        }
 
-        // Phase 2: Peer requests specific notes from us
-        if (msg.type === 'request') {
-          const noteIds = msg.noteIds as string[];
-          for (const noteId of noteIds) {
-            const note = await db.notes.get(noteId);
-            if (note) {
-              const compressed = await compressNote(note);
-              sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+          // Phase 3: Receive a note payload
+          if (msg.type === 'note') {
+            const arr = new Uint8Array(msg.payload as number[]);
+            try {
+              const note = await decompressNote(arr);
+              const existing = await db.notes.get(note.id);
+              if (!existing || new Date(note.updatedAt) > new Date(existing.updatedAt)) {
+                const hash = await computeContentHash(note.content, note.attachments);
+                await db.notes.put({ ...note, contentHash: hash });
+                onNotesChanged();
+              }
+            } catch (e) {
+              console.warn('Failed to decompress note payload:', e);
             }
           }
-        }
-
-        // Phase 3: Receive a note payload
-        if (msg.type === 'note') {
-          const arr = new Uint8Array(msg.payload as number[]);
-          try {
-            const note = await decompressNote(arr);
-            const existing = await db.notes.get(note.id);
-            if (!existing || new Date(note.updatedAt) > new Date(existing.updatedAt)) {
-              const hash = await computeContentHash(note.content, note.attachments);
-              await db.notes.put({ ...note, contentHash: hash });
-              onNotesChanged();
-            }
-          } catch (e) {
-            console.warn('Failed to decompress note payload:', e);
-          }
-        }
+        })();
       };
 
       roomsRef.current.set(pairing.id, { room, send: sendData });
