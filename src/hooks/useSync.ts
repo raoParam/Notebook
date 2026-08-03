@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { db, type Note, type Pairing } from '@/lib/db';
+import { db, type Pairing } from '@/lib/db';
 import {
   buildLocalManifest,
   compressNote,
@@ -26,15 +26,16 @@ export type SyncStatus =
 
 const APP_ID = 'notebook-p2p-sync-v1';
 
-// Minimal types we need from Trystero
+interface TrysteroAction {
+  send: (data: unknown, options?: { target?: string | string[] }) => Promise<void>;
+  onMessage: ((data: unknown, context: { peerId: string }) => void | Promise<void>) | null;
+}
+
 interface TrysteroRoom {
-  onPeerJoin: (cb: (peerId: string) => void) => void;
-  onPeerLeave: (cb: (peerId: string) => void) => void;
-  makeAction: (name: string) => [
-    (data: unknown, peerIds?: string[]) => void,
-    (cb: (data: unknown, peerId: string) => void) => void,
-  ];
-  leave?: () => void;
+  onPeerJoin: ((peerId: string) => void) | null;
+  onPeerLeave: ((peerId: string) => void) | null;
+  makeAction: (name: string) => TrysteroAction;
+  leave: () => Promise<void>;
 }
 
 interface TrysteroModule {
@@ -48,7 +49,7 @@ async function getTrystero(): Promise<TrysteroModule> {
 
 interface RoomEntry {
   room: TrysteroRoom;
-  send: (data: unknown, peerIds?: string[]) => void;
+  send: (data: unknown, targetPeerId?: string) => void;
 }
 
 export function useSync(onNotesChanged: () => void) {
@@ -72,21 +73,25 @@ export function useSync(onNotesChanged: () => void) {
     try {
       const trystero = await getTrystero();
       const room = trystero.joinRoom({ appId: APP_ID }, pairing.id);
-      const [sendData, receiveData] = room.makeAction('sync');
+      const syncAction = room.makeAction('sync');
 
-      room.onPeerJoin((peerId: string) => {
+      const sendData = (data: unknown, targetPeerId?: string) => {
+        syncAction.send(data, targetPeerId ? { target: targetPeerId } : undefined);
+      };
+
+      room.onPeerJoin = (peerId: string) => {
         setConnectedPeers((prev) => {
           if (prev.some((p) => p.peerId === peerId)) return prev;
           return [...prev, { pairingId: pairing.id, peerId }];
         });
-      });
+      };
 
-      room.onPeerLeave((peerId: string) => {
+      room.onPeerLeave = (peerId: string) => {
         setConnectedPeers((prev) => prev.filter((p) => p.peerId !== peerId));
-      });
+      };
 
       // Handle incoming sync messages
-      receiveData(async (data: unknown, peerId: string) => {
+      syncAction.onMessage = async (data: unknown, { peerId }: { peerId: string }) => {
         if (typeof data !== 'object' || data === null) return;
         const msg = data as Record<string, unknown>;
 
@@ -97,7 +102,7 @@ export function useSync(onNotesChanged: () => void) {
 
           // What we need from peer
           const toRequest = computeDiff(localManifest, peerManifest);
-          sendData({ type: 'request', noteIds: toRequest }, [peerId]);
+          sendData({ type: 'request', noteIds: toRequest }, peerId);
 
           // What peer needs from us
           const peerNeeds = computeDiff(peerManifest, localManifest);
@@ -105,10 +110,10 @@ export function useSync(onNotesChanged: () => void) {
             const note = await db.notes.get(noteId);
             if (note) {
               const compressed = await compressNote(note);
-              sendData({ type: 'note', payload: Array.from(compressed) }, [peerId]);
+              sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
             }
           }
-          sendData({ type: 'done' }, [peerId]);
+          sendData({ type: 'done' }, peerId);
         }
 
         // Phase 2: Peer requests specific notes from us
@@ -118,7 +123,7 @@ export function useSync(onNotesChanged: () => void) {
             const note = await db.notes.get(noteId);
             if (note) {
               const compressed = await compressNote(note);
-              sendData({ type: 'note', payload: Array.from(compressed) }, [peerId]);
+              sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
             }
           }
         }
@@ -138,7 +143,7 @@ export function useSync(onNotesChanged: () => void) {
             console.warn('Failed to decompress note payload:', e);
           }
         }
-      });
+      };
 
       roomsRef.current.set(pairing.id, { room, send: sendData });
     } catch (e) {
@@ -213,7 +218,7 @@ export function useSync(onNotesChanged: () => void) {
       for (const peer of activePeers) {
         const roomEntry = roomsRef.current.get(peer.pairingId);
         if (roomEntry) {
-          roomEntry.send({ type: 'manifest', entries: localManifest }, [peer.peerId]);
+          roomEntry.send({ type: 'manifest', entries: localManifest }, peer.peerId);
           sent++;
         }
       }
@@ -244,3 +249,4 @@ export function useSync(onNotesChanged: () => void) {
     setSyncStatus,
   };
 }
+
