@@ -26,6 +26,12 @@ export type SyncStatus =
 
 const APP_ID = 'notebook-p2p-sync-v1';
 
+const RELAY_URLS = [
+  'wss://tracker.openwebtorrent.com',
+  'wss://tracker.webtorrent.dev',
+  'wss://tracker.files.fm:7073/announce',
+];
+
 interface TrysteroAction {
   send: (data: unknown, options?: { target?: string | string[] }) => Promise<void>;
   onMessage: ((data: unknown, context: { peerId: string }) => void | Promise<void>) | null;
@@ -39,7 +45,7 @@ interface TrysteroRoom {
 }
 
 interface TrysteroModule {
-  joinRoom: (config: { appId: string }, roomId: string) => TrysteroRoom;
+  joinRoom: (config: { appId: string; relayUrls?: string[] }, roomId: string) => TrysteroRoom;
 }
 
 async function getTrystero(): Promise<TrysteroModule> {
@@ -58,6 +64,8 @@ export function useSync(onNotesChanged: () => void) {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ stage: 'idle' });
 
   const roomsRef = useRef<Map<string, RoomEntry>>(new Map());
+  const connectedPeersRef = useRef<PeerState[]>([]);
+  connectedPeersRef.current = connectedPeers;
 
   // Load pairings from DB
   const loadPairings = useCallback(async () => {
@@ -72,7 +80,7 @@ export function useSync(onNotesChanged: () => void) {
 
     try {
       const trystero = await getTrystero();
-      const room = trystero.joinRoom({ appId: APP_ID }, pairing.id);
+      const room = trystero.joinRoom({ appId: APP_ID, relayUrls: RELAY_URLS }, pairing.id);
       const syncAction = room.makeAction('sync');
 
       const sendData = (data: unknown, targetPeerId?: string) => {
@@ -82,12 +90,18 @@ export function useSync(onNotesChanged: () => void) {
       room.onPeerJoin = (peerId: string) => {
         setConnectedPeers((prev) => {
           if (prev.some((p) => p.peerId === peerId)) return prev;
-          return [...prev, { pairingId: pairing.id, peerId }];
+          const next = [...prev, { pairingId: pairing.id, peerId }];
+          connectedPeersRef.current = next;
+          return next;
         });
       };
 
       room.onPeerLeave = (peerId: string) => {
-        setConnectedPeers((prev) => prev.filter((p) => p.peerId !== peerId));
+        setConnectedPeers((prev) => {
+          const next = prev.filter((p) => p.peerId !== peerId);
+          connectedPeersRef.current = next;
+          return next;
+        });
       };
 
       // Handle incoming sync messages
@@ -157,7 +171,11 @@ export function useSync(onNotesChanged: () => void) {
       try { entry.room.leave?.(); } catch {}
       roomsRef.current.delete(pairingId);
     }
-    setConnectedPeers((prev) => prev.filter((p) => p.pairingId !== pairingId));
+    setConnectedPeers((prev) => {
+      const next = prev.filter((p) => p.pairingId !== pairingId);
+      connectedPeersRef.current = next;
+      return next;
+    });
   }, []);
 
   // On mount: load pairings and join all rooms
@@ -199,13 +217,35 @@ export function useSync(onNotesChanged: () => void) {
   );
 
   const triggerSync = useCallback(async () => {
-    const activePeers = connectedPeers;
+    let activePeers = connectedPeersRef.current;
+
+    // If no active connections, attempt auto-reconnect and wait up to 5s
+    if (activePeers.length === 0) {
+      setSyncStatus({ stage: 'connecting' });
+      const currentPairings = await db.pairings.toArray();
+
+      for (const p of currentPairings) {
+        // Rejoin rooms if needed
+        if (!roomsRef.current.has(p.id)) {
+          await joinRoom(p);
+        }
+      }
+
+      // Wait up to 5 seconds for WebRTC peer join event
+      const start = Date.now();
+      while (Date.now() - start < 5000) {
+        await new Promise((res) => setTimeout(res, 500));
+        activePeers = connectedPeersRef.current;
+        if (activePeers.length > 0) break;
+      }
+    }
+
     if (activePeers.length === 0) {
       setSyncStatus({
         stage: 'error',
-        message: 'No device connected. Make sure the other device has the app open.',
+        message: 'No device connected. Ensure both devices are online with Notebook open.',
       });
-      setTimeout(() => setSyncStatus({ stage: 'idle' }), 4000);
+      setTimeout(() => setSyncStatus({ stage: 'idle' }), 5000);
       return;
     }
 
@@ -237,7 +277,7 @@ export function useSync(onNotesChanged: () => void) {
       setSyncStatus({ stage: 'error', message: 'Sync failed. Please try again.' });
       setTimeout(() => setSyncStatus({ stage: 'idle' }), 4000);
     }
-  }, [connectedPeers]);
+  }, [joinRoom]);
 
   return {
     pairings,
@@ -249,4 +289,5 @@ export function useSync(onNotesChanged: () => void) {
     setSyncStatus,
   };
 }
+
 

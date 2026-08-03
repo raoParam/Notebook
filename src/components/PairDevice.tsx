@@ -145,11 +145,14 @@ export function PairDevice({
                               width: 7,
                               height: 7,
                               borderRadius: '50%',
-                              background: isConnected ? '#22c55e' : 'var(--ink-muted)',
+                              background: isConnected ? '#22c55e' : 'var(--gold)',
                               flexShrink: 0,
                             }}
                           />
                           <span style={{ fontSize: 13, fontWeight: 500 }}>{p.label}</span>
+                          <span style={{ fontSize: 11, color: isConnected ? '#22c55e' : 'var(--ink-soft)' }}>
+                            ({isConnected ? 'Online' : 'Waiting for connection'})
+                          </span>
                         </div>
                         <div style={{ fontSize: 11, color: 'var(--ink-muted)', fontFamily: 'var(--mono-font)', marginTop: 2, paddingLeft: 14 }}>
                           {p.id}
