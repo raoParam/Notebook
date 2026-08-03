@@ -1,0 +1,190 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,wght@0,400;0,600;0,700;1,400&display=swap');
+@import "tailwindcss";
+
+/* ─── Design Tokens ─────────────────────────────────── */
+:root {
+  --bg-app: #F5F4F0;
+  --bg-paper: #FFFFFF;
+  --bg-sidebar: #EFEDE7;
+  --ink: #20242A;
+  --ink-soft: #5B6169;
+  --ink-muted: #858177;
+  --accent: #16324F;
+  --accent-soft: #3D5A78;
+  --gold: #AD8A4E;
+  --border: #DEDAD0;
+  --border-light: #DEDAD0;
+  --danger: #A23B2E;
+  --danger-hover: #7F2D24;
+  --hover: #E6E2D9;
+  --shadow-sm: 0 1px 2px rgba(32, 36, 42, 0.06);
+  --shadow: 0 12px 28px rgba(32, 36, 42, 0.10);
+  --radius: 10px;
+  --radius-sm: 6px;
+  --sidebar-width: 260px;
+  --header-height: 56px;
+  --font: 'Inter', sans-serif;
+  --mono-font: 'JetBrains Mono', monospace;
+  --serif-font: 'Source Serif 4', serif;
+}
+
+.dark {
+  --bg-app: #14171C;
+  --bg-paper: #1B1F26;
+  --bg-sidebar: #101317;
+  --ink: #E7E5DE;
+  --ink-soft: #9BA1AA;
+  --ink-muted: #6E747C;
+  --accent: #7FA8CC;
+  --accent-soft: #9CC0E0;
+  --gold: #D4AF6A;
+  --border: #2A2F37;
+  --border-light: #2A2F37;
+  --danger: #E0796A;
+  --danger-hover: #F0968A;
+  --hover: #22262E;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
+  --shadow: 0 12px 28px rgba(0, 0, 0, 0.5);
+}
+
+/* ─── Reset & Base ──────────────────────────────────── */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--font);
+  color: var(--ink);
+  background: var(--bg-app);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  font-size: 15px;
+}
+
+#__next, body > div:first-child {
+  height: 100%;
+}
+
+::selection {
+  background: rgba(173, 138, 78, 0.24);
+  color: var(--ink);
+}
+
+.dark ::selection {
+  background: rgba(127, 168, 204, 0.35);
+  color: var(--ink);
+}
+
+/* ─── Scrollbar ─────────────────────────────────────── */
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #C9C3B6; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+.dark ::-webkit-scrollbar-thumb { background: #3A3F47; }
+.dark ::-webkit-scrollbar-thumb:hover { background: var(--gold); }
+
+/* ─── Markdown Preview ──────────────────────────────── */
+.prose-notebook {
+  font-family: var(--serif-font);
+  color: var(--ink);
+  line-height: 1.75;
+}
+.prose-notebook h1,
+.prose-notebook h2,
+.prose-notebook h3,
+.prose-notebook h4 {
+  font-family: var(--serif-font);
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--accent);
+  margin-top: 1.3em;
+  margin-bottom: 0.4em;
+}
+.prose-notebook h1 {
+  font-size: 1.6em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--border);
+}
+.prose-notebook h2 { font-size: 1.35em; }
+.prose-notebook h3 { font-size: 1.15em; }
+.prose-notebook p { margin-bottom: 1em; }
+.prose-notebook ul, .prose-notebook ol {
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+}
+.prose-notebook li { margin-bottom: 0.25em; }
+.prose-notebook code {
+  background: var(--bg-sidebar);
+  color: var(--ink);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: 0.875em;
+  font-family: var(--mono-font);
+}
+.prose-notebook pre {
+  background: #1E232B;
+  color: #EAEAEA;
+  padding: 14px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin-bottom: 1em;
+  border: 1px solid #1E232B;
+}
+.dark .prose-notebook pre {
+  background: #262B33;
+  color: var(--ink);
+  border-color: var(--border);
+}
+.prose-notebook pre code {
+  background: transparent;
+  color: #EAEAEA;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.dark .prose-notebook pre code { color: var(--ink); }
+.prose-notebook blockquote {
+  border-left: 3px solid var(--gold);
+  padding: 6px 16px;
+  margin-bottom: 1em;
+  background: var(--bg-sidebar);
+  color: var(--ink-soft);
+  font-style: italic;
+}
+.prose-notebook table { width: 100%; border-collapse: collapse; margin-bottom: 1em; }
+.prose-notebook th, .prose-notebook td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+  font-size: 14px;
+}
+.prose-notebook th { background: var(--bg-sidebar); font-weight: 600; }
+.prose-notebook hr { border: none; border-top: 1px solid var(--border); margin: 1.5em 0; }
+.prose-notebook a { color: var(--accent); text-decoration: none; }
+.prose-notebook a:hover { text-decoration: underline; }
+.prose-notebook img { max-width: 100%; border-radius: var(--radius-sm); }
+
+/* ─── KaTeX overrides ───────────────────────────────── */
+.katex { font-size: 1em; }
+
+/* ─── Animations ────────────────────────────────────── */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in { animation: fadeIn 0.18s ease forwards; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.4; }
+}
+.animate-pulse-dot { animation: pulse-dot 1.5s ease-in-out infinite; }
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-spin-slow { animation: spin 1s linear infinite; }
