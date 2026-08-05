@@ -73,7 +73,49 @@ async function renderContent(note: Note): Promise<string> {
     }
   }
 
-  return html;
+  // Sanitize the rendered HTML before injecting it into the DOM.
+  // Notes can arrive via P2P sync or .md import, so malicious markup
+  // (e.g. <script>, onerror handlers) must be stripped. KaTeX emits
+  // MathML tags — including semantics/annotation, which DOMPurify
+  // disallows by default — so they are explicitly allowed to keep math
+  // rendering intact.
+  const { default: DOMPurify } = await import('dompurify');
+  return DOMPurify.sanitize(html, {
+    ADD_TAGS: [
+      'math',
+      'menclose',
+      'merror',
+      'mfrac',
+      'mi',
+      'mlabeledtr',
+      'mmultiscripts',
+      'mn',
+      'mo',
+      'mover',
+      'mpadded',
+      'mphantom',
+      'mroot',
+      'mrow',
+      'ms',
+      'mspace',
+      'msqrt',
+      'mstyle',
+      'msub',
+      'msup',
+      'msubsup',
+      'mtable',
+      'mtd',
+      'mtext',
+      'mtr',
+      'munder',
+      'munderover',
+      'mprescripts',
+      'semantics',
+      'annotation',
+      'annotation-xml',
+    ],
+    ADD_ATTR: ['encoding'],
+  });
 }
 
 function resolveAttachments(

@@ -78,23 +78,53 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
   const noteIdRef = useRef(note.id);
+  // Last title/content this editor itself wrote back to the note, used to tell
+  // apart the round-trip of our own debounced save from a real external update.
+  const lastWrittenRef = useRef({ title: note.title, content: note.content });
 
-  // Sync local state when note changes
+  // Sync local state when the note changes. Besides switching notes (note.id),
+  // this also picks up external updates to the SAME note (e.g. incoming P2P sync).
+  // We only resync when the incoming note differs from what THIS editor last wrote
+  // back; when it matches our own last write it's just the round-trip of our own
+  // debounced save, which must not clobber in-progress typing.
   useEffect(() => {
     if (note.id !== noteIdRef.current) {
       noteIdRef.current = note.id;
+      lastWrittenRef.current = { title: note.title, content: note.content };
       setTitle(note.title);
       setContent(note.content);
       setShowDrawing(false);
+      return;
+    }
+
+    const last = lastWrittenRef.current;
+    if (note.title !== last.title || note.content !== last.content) {
+      // External change (incoming sync / another device). Cancel any pending
+      // debounced save so stale local content doesn't overwrite it, then adopt
+      // the fresh note state.
+      if (saveTimeout.current) {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = null;
+      }
+      lastWrittenRef.current = { title: note.title, content: note.content };
+      setTitle(note.title);
+      setContent(note.content);
     }
   }, [note.id, note.title, note.content]);
 
   const scheduleUpdate = useCallback(
     (patch: Partial<Pick<Note, 'title' | 'content'>>) => {
       if (saveTimeout.current) clearTimeout(saveTimeout.current);
-      saveTimeout.current = setTimeout(() => onUpdate(patch), 350);
+      saveTimeout.current = setTimeout(() => {
+        saveTimeout.current = null;
+        lastWrittenRef.current = {
+          title: patch.title ?? title,
+          content: patch.content ?? content,
+        };
+        onUpdate(patch);
+      }, 350);
     },
-    [onUpdate]
+    [onUpdate, title, content]
   );
 
   const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -171,6 +201,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       };
       const newContent = content + (content && !content.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
       setContent(newContent);
+      lastWrittenRef.current = { title, content: newContent };
       onUpdate({ attachments, content: newContent, title });
     } catch {
       alert('Could not add that image. Please try another file.');
@@ -187,6 +218,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     };
     const newContent = content + (content && !content.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
     setContent(newContent);
+    lastWrittenRef.current = { title, content: newContent };
     onUpdate({ attachments, content: newContent, title });
     setShowDrawing(false);
   }
