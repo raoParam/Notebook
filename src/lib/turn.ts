@@ -3,6 +3,11 @@
  *
  * Provides TURN relay servers so WebRTC connections work across
  * mobile data (4G/5G), symmetric NATs, and corporate firewalls.
+ *
+ * Credentials are read exclusively from environment variables:
+ *   NEXT_PUBLIC_METERED_APP_NAME
+ *   NEXT_PUBLIC_METERED_API_KEY
+ * If either is unset, the app logs a warning and falls back to STUN-only.
  */
 
 export interface IceServer {
@@ -28,8 +33,13 @@ export async function getIceServers(): Promise<IceServer[]> {
     return cachedServers;
   }
 
-  const appName = process.env.NEXT_PUBLIC_METERED_APP_NAME || 'task-todoapp';
-  const apiKey = process.env.NEXT_PUBLIC_METERED_API_KEY || '0918b83e3b4eb648deb1a6d2164f3deb4cbf';
+  const appName = process.env.NEXT_PUBLIC_METERED_APP_NAME;
+  const apiKey = process.env.NEXT_PUBLIC_METERED_API_KEY;
+
+  if (!appName || !apiKey) {
+    console.warn('TURN credentials not configured, falling back to STUN-only');
+    return FALLBACK_ICE_SERVERS;
+  }
 
   try {
     const url = `https://${appName}.metered.live/api/v1/turn/credentials?apiKey=${apiKey}`;
