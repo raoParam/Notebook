@@ -185,6 +185,7 @@ export default function NotebookPage() {
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
       {/* Header */}
       <header
+        className="app-header"
         style={{
           height: 'var(--header-height)',
           display: 'flex',
@@ -200,7 +201,7 @@ export default function NotebookPage() {
           id="menu-toggle"
           onClick={() => setSidebarOpen((v) => !v)}
           title="Toggle sidebar"
-          style={{ ...iconBtnStyle, marginRight: 16 }}
+          style={{ ...iconBtnStyle, marginRight: 8 }}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
@@ -211,12 +212,12 @@ export default function NotebookPage() {
           Notebook
         </h1>
 
-        <div style={{ flex: 1 }} />
+        <div style={{ flex: 1, minWidth: 8 }} />
 
         {/* Right side items: Saved time, Sync button, Settings button */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+        <div className="header-actions" style={{ display: 'flex', alignItems: 'center', gap: 14, flexShrink: 0 }}>
           {activeNote && (
-            <span style={{ fontSize: 12, color: 'var(--ink-muted)', flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+            <span className="header-saved-time" style={{ fontSize: 12, color: 'var(--ink-muted)', flexShrink: 0, display: 'flex', alignItems: 'center', whiteSpace: 'nowrap' }}>
               Saved {formatRelative(activeNote.updatedAt)}
             </span>
           )}
@@ -325,6 +326,12 @@ export default function NotebookPage() {
       <style>{`
         .mobile-only   { display: none; }
         .desktop-only  { display: flex; }
+
+        @media (max-width: 640px) {
+          .app-header { padding: 0 12px !important; }
+          .header-actions { gap: 8px !important; }
+          .header-saved-time { display: none !important; }
+        }
 
         @media (max-width: 820px) {
           .mobile-only    { display: flex !important; }

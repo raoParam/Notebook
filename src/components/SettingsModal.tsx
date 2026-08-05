@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { useTheme, THEME_PRESETS, BuiltInThemeId, ThemeColors, ThemeId } from '@/components/ThemeProvider';
+import { useTheme, THEME_PRESETS, BuiltInThemeId, ThemeColors, ThemeId, FONT_OPTIONS } from '@/components/ThemeProvider';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -30,10 +30,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     themeId,
     activeColors,
     customColors,
+    fonts,
     selectTheme,
     updateCustomColor,
     saveCustomTheme,
     resetCustomTheme,
+    updateFont,
+    resetFonts,
   } = useTheme();
 
   return (
@@ -52,9 +55,10 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
       onClick={onClose}
     >
       <div
+        className="settings-modal-card"
         style={{
           width: '100%',
-          maxWidth: 780,
+          maxWidth: 680,
           maxHeight: '85vh',
           background: 'var(--bg-paper)',
           borderRadius: 'var(--radius)',
@@ -70,7 +74,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         {/* Modal Header */}
         <div
           style={{
-            padding: '16px 20px',
+            padding: '14px 18px',
             borderBottom: '1px solid var(--border)',
             display: 'flex',
             alignItems: 'center',
@@ -82,7 +86,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: 'var(--accent)' }}>
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
-            <h2 style={{ fontSize: 17, fontWeight: 600, color: 'var(--ink)' }}>
+            <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--ink)' }}>
               Settings
             </h2>
           </div>
@@ -98,14 +102,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
         </div>
 
         {/* Modal Body with Sidebar Tabs */}
-        <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
+        <div className="settings-modal-body" style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
           {/* Settings Nav Tabs */}
           <div
+            className="settings-nav-tabs"
             style={{
-              width: 180,
+              width: 140,
               borderRight: '1px solid var(--border)',
               background: 'var(--bg-sidebar)',
-              padding: '12px 8px',
+              padding: '10px 6px',
               display: 'flex',
               flexDirection: 'column',
               gap: 4,
@@ -130,7 +135,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
 
           {/* Settings Tab Content */}
-          <div style={{ flex: 1, overflowY: 'auto', padding: 24 }}>
+          <div className="settings-content-area" style={{ flex: 1, minWidth: 0, overflowY: 'auto', padding: '20px 22px' }}>
             {activeTab === 'appearance' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
                 {/* ── Section 1: Default Themes ── */}
@@ -141,6 +146,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   </p>
 
                   <div
+                    className="theme-presets-grid"
                     style={{
                       display: 'grid',
                       gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))',
@@ -194,7 +200,110 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                 <hr style={{ border: 'none', borderTop: '1px solid var(--border)' }} />
 
-                {/* ── Section 2: Custom Theme ── */}
+                {/* ── Section 2: Typography & Fonts ── */}
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                    <div>
+                      <h3 style={sectionTitleStyle}>Typography & Fonts</h3>
+                      <p style={sectionDescStyle}>
+                        Choose custom font families for application interface, note titles, and editor code.
+                      </p>
+                    </div>
+                    <button
+                      onClick={resetFonts}
+                      style={{
+                        padding: '4px 10px',
+                        fontSize: 12,
+                        fontWeight: 500,
+                        color: 'var(--ink-soft)',
+                        background: 'transparent',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        transition: 'background 0.15s',
+                      }}
+                    >
+                      Reset Fonts
+                    </button>
+                  </div>
+
+                  <div
+                    className="font-pickers-grid"
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
+                      gap: 12,
+                      marginTop: 12,
+                    }}
+                  >
+                    {/* UI Font */}
+                    <div style={fontCardStyle}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)' }}>
+                        Interface Font (UI)
+                      </span>
+                      <select
+                        value={fonts.uiFont}
+                        onChange={(e) => updateFont('uiFont', e.target.value)}
+                        style={fontSelectStyle}
+                      >
+                        {FONT_OPTIONS.ui.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.uiFont }}>
+                        Aa Bb Cc 123 — Interface
+                      </div>
+                    </div>
+
+                    {/* Reading & Title Font */}
+                    <div style={fontCardStyle}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)' }}>
+                        Reading & Title (Serif)
+                      </span>
+                      <select
+                        value={fonts.serifFont}
+                        onChange={(e) => updateFont('serifFont', e.target.value)}
+                        style={fontSelectStyle}
+                      >
+                        {FONT_OPTIONS.serif.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.serifFont }}>
+                        Notebook — Title Heading
+                      </div>
+                    </div>
+
+                    {/* Monospace Code Font */}
+                    <div style={fontCardStyle}>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)' }}>
+                        Editor & Code (Mono)
+                      </span>
+                      <select
+                        value={fonts.monoFont}
+                        onChange={(e) => updateFont('monoFont', e.target.value)}
+                        style={fontSelectStyle}
+                      >
+                        {FONT_OPTIONS.mono.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.monoFont }}>
+                        const x = 42; // code
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <hr style={{ border: 'none', borderTop: '1px solid var(--border)' }} />
+
+                {/* ── Section 3: Custom Theme ── */}
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                     <div>
@@ -210,6 +319,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
 
                   {/* Color pickers grid */}
                   <div
+                    className="color-pickers-grid"
                     style={{
                       display: 'grid',
                       gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))',
@@ -281,7 +391,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   </div>
 
                   {/* Actions: Save Theme & Reset */}
-                  <div style={{ display: 'flex', gap: 10, marginTop: 18, justifyContent: 'flex-end' }}>
+                  <div className="custom-theme-actions" style={{ display: 'flex', gap: 10, marginTop: 18, justifyContent: 'flex-end' }}>
                     <button
                       onClick={resetCustomTheme}
                       style={{
@@ -320,6 +430,57 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             )}
           </div>
         </div>
+
+        {/* Responsive CSS for mobile phone view */}
+        <style>{`
+          .settings-modal-card {
+            width: 94vw !important;
+            max-width: 680px !important;
+            max-height: 85vh !important;
+          }
+
+          .settings-nav-tabs button {
+            white-space: nowrap;
+          }
+
+          @media (max-width: 640px) {
+            .settings-modal-card {
+              width: 95vw !important;
+              max-height: 90vh !important;
+            }
+            .settings-modal-body {
+              flex-direction: column !important;
+            }
+            .settings-nav-tabs {
+              width: 100% !important;
+              flex-direction: row !important;
+              border-right: none !important;
+              border-bottom: 1px solid var(--border) !important;
+              padding: 6px 8px !important;
+            }
+            .settings-nav-tabs button {
+              width: auto !important;
+              padding: 6px 12px !important;
+            }
+            .settings-content-area {
+              padding: 14px 14px 20px !important;
+            }
+            .font-pickers-grid, .color-pickers-grid {
+              grid-template-columns: 1fr !important;
+            }
+            .theme-presets-grid {
+              grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)) !important;
+            }
+            .custom-theme-actions {
+              flex-wrap: wrap !important;
+              justify-content: stretch !important;
+            }
+            .custom-theme-actions button {
+              flex: 1 1 auto !important;
+              text-align: center !important;
+            }
+          }
+        `}</style>
       </div>
     </div>
   );
@@ -370,4 +531,39 @@ const activeBadgeStyle: React.CSSProperties = {
   background: 'var(--accent)',
   padding: '2px 8px',
   borderRadius: 10,
+};
+
+const fontCardStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  padding: '10px 12px',
+  background: 'var(--bg-app)',
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--border)',
+};
+
+const fontSelectStyle: React.CSSProperties = {
+  padding: '5px 8px',
+  fontSize: 12.5,
+  borderRadius: 'var(--radius-sm)',
+  border: '1px solid var(--border)',
+  background: 'var(--bg-paper)',
+  color: 'var(--ink)',
+  outline: 'none',
+  cursor: 'pointer',
+  fontFamily: 'var(--font)',
+};
+
+const fontPreviewStyle: React.CSSProperties = {
+  fontSize: 12.5,
+  color: 'var(--ink-soft)',
+  padding: '6px 8px',
+  background: 'var(--bg-paper)',
+  borderRadius: 4,
+  border: '1px border-dashed var(--border)',
+  marginTop: 2,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
 };

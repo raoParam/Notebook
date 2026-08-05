@@ -261,25 +261,31 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg-paper)' }}>
       {/* Title */}
-      <input
-        value={title}
-        onChange={handleTitleChange}
-        placeholder="Untitled"
-        spellCheck={false}
-        autoComplete="off"
-        style={{
-          padding: '16px 24px 8px',
-          fontSize: 22,
-          fontWeight: 600,
-          border: 'none',
-          outline: 'none',
-          background: 'transparent',
-          color: 'var(--ink)',
-          fontFamily: 'var(--serif-font)',
-          width: '100%',
-          flexShrink: 0,
-        }}
-      />
+      <div style={{ padding: '12px 18px 6px', flexShrink: 0, display: 'flex', alignItems: 'center' }} className="note-title-container">
+        <input
+          value={title}
+          onChange={handleTitleChange}
+          placeholder="Untitled note title…"
+          spellCheck={false}
+          autoComplete="off"
+          className="note-title-input"
+          style={{
+            width: title ? `${Math.max(title.length + 3, 12)}ch` : '18ch',
+            maxWidth: '100%',
+            minWidth: '120px',
+            padding: '8px 14px',
+            fontSize: 20,
+            fontWeight: 600,
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            outline: 'none',
+            background: 'var(--bg-app)',
+            color: 'var(--ink)',
+            fontFamily: 'var(--serif-font)',
+            transition: 'border-color 0.15s ease, box-shadow 0.15s ease, width 0.1s ease',
+          }}
+        />
+      </div>
 
       {/* Toolbar */}
       <Toolbar
@@ -378,7 +384,21 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
       {/* Responsive CSS */}
       <style>{`
+        .note-title-input {
+          field-sizing: content;
+        }
+        .note-title-input:hover {
+          border-color: var(--ink-muted) !important;
+        }
+        .note-title-input:focus {
+          border-color: var(--accent) !important;
+          box-shadow: 0 0 0 3px rgba(127, 168, 204, 0.18) !important;
+          background: var(--bg-paper) !important;
+        }
+
         @media (max-width: 820px) {
+          .note-title-container { padding: 10px 12px 4px !important; }
+          .note-title-input { padding: 8px 12px !important; font-size: 18px !important; }
           .mobile-tabs { display: flex !important; }
           .write-pane  { flex: 0 0 100% !important; display: ${mobileTab === 'write' ? 'block' : 'none'} !important; }
           .preview-pane { flex: 0 0 100% !important; border-left: none !important; display: ${mobileTab === 'preview' ? 'block' : 'none'} !important; }

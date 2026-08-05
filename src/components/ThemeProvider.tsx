@@ -131,24 +131,63 @@ export const THEME_PRESETS: Record<BuiltInThemeId, { name: string; isDark: boole
   },
 };
 
+export interface FontSettings {
+  uiFont: string;
+  serifFont: string;
+  monoFont: string;
+}
+
+export const DEFAULT_FONTS: FontSettings = {
+  uiFont: "'Inter', sans-serif",
+  serifFont: "'Source Serif 4', serif",
+  monoFont: "'JetBrains Mono', monospace",
+};
+
+export const FONT_OPTIONS = {
+  ui: [
+    { label: 'Inter (Default)', value: "'Inter', sans-serif" },
+    { label: 'Roboto', value: "'Roboto', sans-serif" },
+    { label: 'Outfit', value: "'Outfit', sans-serif" },
+    { label: 'System UI', value: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+  ],
+  serif: [
+    { label: 'Source Serif 4 (Default)', value: "'Source Serif 4', serif" },
+    { label: 'Merriweather', value: "'Merriweather', serif" },
+    { label: 'Playfair Display', value: "'Playfair Display', serif" },
+    { label: 'Georgia', value: "Georgia, serif" },
+  ],
+  mono: [
+    { label: 'JetBrains Mono (Default)', value: "'JetBrains Mono', monospace" },
+    { label: 'Fira Code', value: "'Fira Code', monospace" },
+    { label: 'Courier Prime', value: "'Courier Prime', monospace" },
+    { label: 'Consolas', value: "Consolas, monospace" },
+  ],
+};
+
 interface ThemeContextType {
   themeId: ThemeId;
   activeColors: ThemeColors;
   customColors: ThemeColors;
+  fonts: FontSettings;
   selectTheme: (id: ThemeId) => void;
   updateCustomColor: (key: keyof ThemeColors, value: string) => void;
   saveCustomTheme: () => void;
   resetCustomTheme: () => void;
+  updateFont: (key: keyof FontSettings, value: string) => void;
+  resetFonts: () => void;
 }
 
 const ThemeContext = createContext<ThemeContextType>({
   themeId: 'light',
   activeColors: THEME_PRESETS.light.colors,
   customColors: THEME_PRESETS.light.colors,
+  fonts: DEFAULT_FONTS,
   selectTheme: () => {},
   updateCustomColor: () => {},
   saveCustomTheme: () => {},
   resetCustomTheme: () => {},
+  updateFont: () => {},
+  resetFonts: () => {},
 });
 
 function applyColorsToDOM(colors: ThemeColors, isDark: boolean) {
@@ -175,21 +214,39 @@ function applyColorsToDOM(colors: ThemeColors, isDark: boolean) {
   }
 }
 
+function applyFontsToDOM(fonts: FontSettings) {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.style.setProperty('--font', fonts.uiFont);
+  root.style.setProperty('--serif-font', fonts.serifFont);
+  root.style.setProperty('--mono-font', fonts.monoFont);
+}
+
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [themeId, setThemeId] = useState<ThemeId>('light');
   const [customColors, setCustomColors] = useState<ThemeColors>(THEME_PRESETS.light.colors);
+  const [fonts, setFonts] = useState<FontSettings>(DEFAULT_FONTS);
   const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     try {
       const savedThemeId = localStorage.getItem('nb-theme-id') as ThemeId | null;
       const savedCustom = localStorage.getItem('nb-custom-colors');
+      const savedFonts = localStorage.getItem('nb-fonts');
       
       let loadedCustom = THEME_PRESETS.light.colors;
       if (savedCustom) {
         try {
           loadedCustom = { ...THEME_PRESETS.light.colors, ...JSON.parse(savedCustom) };
           setCustomColors(loadedCustom);
+        } catch {}
+      }
+
+      let loadedFonts = DEFAULT_FONTS;
+      if (savedFonts) {
+        try {
+          loadedFonts = { ...DEFAULT_FONTS, ...JSON.parse(savedFonts) };
+          setFonts(loadedFonts);
         } catch {}
       }
 
@@ -211,6 +268,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       }
 
       applyColorsToDOM(targetColors, targetDark);
+      applyFontsToDOM(loadedFonts);
     } catch {}
     setIsLoaded(true);
   }, []);
@@ -264,16 +322,36 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     applyColorsToDOM(resetVal, false);
   };
 
+  const updateFont = (key: keyof FontSettings, value: string) => {
+    const updated = { ...fonts, [key]: value };
+    setFonts(updated);
+    try {
+      localStorage.setItem('nb-fonts', JSON.stringify(updated));
+    } catch {}
+    applyFontsToDOM(updated);
+  };
+
+  const resetFonts = () => {
+    setFonts(DEFAULT_FONTS);
+    try {
+      localStorage.setItem('nb-fonts', JSON.stringify(DEFAULT_FONTS));
+    } catch {}
+    applyFontsToDOM(DEFAULT_FONTS);
+  };
+
   return (
     <ThemeContext.Provider
       value={{
         themeId,
         activeColors,
         customColors,
+        fonts,
         selectTheme,
         updateCustomColor,
         saveCustomTheme,
         resetCustomTheme,
+        updateFont,
+        resetFonts,
       }}
     >
       {children}
