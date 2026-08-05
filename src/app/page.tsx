@@ -8,6 +8,7 @@ import { Sidebar } from '@/components/Sidebar';
 import { Editor } from '@/components/Editor';
 import { PairDevice } from '@/components/PairDevice';
 import { SyncButton } from '@/components/SyncButton';
+import { SettingsModal } from '@/components/SettingsModal';
 import type { Note } from '@/lib/db';
 
 export default function NotebookPage() {
@@ -35,10 +36,9 @@ export default function NotebookPage() {
     triggerSync,
   } = useSync(reload);
 
-  const { theme, toggle } = useTheme();
-
-  const [sidebarOpen, setSidebarOpen] = useState(false); // mobile only
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showPairDevice, setShowPairDevice] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
 
   const connectedCount = connectedPeers.length;
 
@@ -78,7 +78,6 @@ export default function NotebookPage() {
     const { marked } = await import('marked');
     marked.setOptions({ breaks: true, gfm: true });
 
-    // Resolve attachments inline
     const content = resolveAttachments(activeNote);
     const title = activeNote.title.trim() || 'Untitled';
 
@@ -125,7 +124,6 @@ export default function NotebookPage() {
 
     try {
       if (document.fonts?.ready) await document.fonts.ready;
-      // Wait for images
       await Promise.all(
         Array.from(el.querySelectorAll('img')).map(
           (img) =>
@@ -177,7 +175,7 @@ export default function NotebookPage() {
           <svg className="animate-spin-slow" style={{ margin: '0 auto 12px', display: 'block', color: 'var(--accent)' }} width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
           </svg>
-          <p style={{ color: 'var(--ink-muted)', fontSize: 14 }}>Loading…</p>
+          <p style={{ color: 'var(--ink-muted)', fontSize: 14 }}>Loading...</p>
         </div>
       </div>
     );
@@ -185,132 +183,95 @@ export default function NotebookPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-      {/* ── Header ── */}
+      {/* Header */}
       <header
         style={{
           height: 'var(--header-height)',
           display: 'flex',
           alignItems: 'center',
-          padding: '0 18px',
+          padding: '0 20px',
           borderBottom: '1px solid var(--border)',
           background: 'var(--bg-app)',
           flexShrink: 0,
-          gap: 10,
         }}
       >
-        {/* Mobile menu toggle */}
+        {/* Menu toggle button (three horizontal lines) */}
         <button
           id="menu-toggle"
           onClick={() => setSidebarOpen((v) => !v)}
           title="Toggle sidebar"
-          style={iconBtnStyle}
-          className="mobile-only"
+          style={{ ...iconBtnStyle, marginRight: 16 }}
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
           </svg>
         </button>
 
-        <h1 style={{ fontFamily: 'var(--serif-font)', fontSize: 20, fontWeight: 600, color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-          </svg>
+        <h1 style={{ fontFamily: 'var(--serif-font)', fontSize: 20, fontWeight: 600, color: 'var(--accent)', flexShrink: 0 }}>
           Notebook
         </h1>
 
-        {activeNote && (
-          <span style={{ fontSize: 12, color: 'var(--ink-muted)', marginLeft: 4, flexShrink: 0, display: 'flex', alignItems: 'center' }} className="desktop-only">
-            Saved {formatRelative(activeNote.updatedAt)}
-          </span>
-        )}
-
         <div style={{ flex: 1 }} />
 
-        {/* Sync button */}
-        <SyncButton
-          syncStatus={syncStatus}
-          connectedCount={connectedCount}
-          onSync={triggerSync}
-        />
-
-        {/* Theme toggle */}
-        <button
-          onClick={toggle}
-          title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-          style={iconBtnStyle}
-        >
-          {theme === 'dark' ? (
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/>
-              <path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/>
-              <path d="M2 12h2"/><path d="M20 12h2"/>
-              <path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/>
-            </svg>
-          ) : (
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 3a6.364 6.364 0 0 0 9 9 9 9 0 1 1-9-9z"/>
-            </svg>
+        {/* Right side items: Saved time, Sync button, Settings button */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+          {activeNote && (
+            <span style={{ fontSize: 12, color: 'var(--ink-muted)', flexShrink: 0, display: 'flex', alignItems: 'center' }}>
+              Saved {formatRelative(activeNote.updatedAt)}
+            </span>
           )}
-        </button>
+
+          {/* Sync button */}
+          <SyncButton
+            syncStatus={syncStatus}
+            connectedCount={connectedCount}
+            onSync={triggerSync}
+          />
+
+          {/* Settings button (replaces Theme button) */}
+          <button
+            onClick={() => setShowSettings(true)}
+            title="Settings & Appearance"
+            style={iconBtnStyle}
+          >
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
       </header>
 
-      {/* ── Main ── */}
+      {/* Main */}
       <div style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
-        {/* Mobile sidebar overlay */}
+        {/* Backdrop overlay */}
         {sidebarOpen && (
           <div
             onClick={() => setSidebarOpen(false)}
             style={{
               position: 'fixed',
               inset: 0,
-              background: 'rgba(32,36,42,0.35)',
+              background: 'rgba(0,0,0,0.4)',
+              backdropFilter: 'blur(2px)',
               zIndex: 100,
             }}
-            className="mobile-only"
           />
         )}
 
-        {/* Sidebar */}
+        {/* Single Drawer Sidebar */}
         <div
-          style={{
-            width: 'var(--sidebar-width)',
-            minWidth: 'var(--sidebar-width)',
-            flexShrink: 0,
-            display: 'flex',
-            flexDirection: 'column',
-            overflow: 'hidden',
-          }}
-          className="sidebar-desktop"
-        >
-          <Sidebar
-            notes={notes}
-            activeId={activeId}
-            sortOrder={sortOrder}
-            onSelectNote={handleSelectNote}
-            onAddNote={handleAddNote}
-            onDeleteNote={handleDeleteNote}
-            onSortChange={changeSortOrder}
-            connectedCount={connectedCount}
-            onOpenSettings={() => setShowPairDevice(true)}
-            onOpenPairDevice={() => setShowPairDevice(true)}
-          />
-        </div>
-
-        {/* Mobile sidebar overlay */}
-        <div
-          className="sidebar-mobile"
           style={{
             position: 'fixed',
             top: 0,
             left: 0,
             bottom: 0,
             width: 'var(--sidebar-width)',
+            maxWidth: '85vw',
             zIndex: 110,
             display: 'flex',
             flexDirection: 'column',
             transform: sidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
             transition: 'transform 0.25s ease',
-            boxShadow: 'var(--shadow)',
+            boxShadow: sidebarOpen ? '4px 0 24px rgba(0,0,0,0.18)' : 'none',
           }}
         >
           <Sidebar
@@ -323,7 +284,7 @@ export default function NotebookPage() {
             onSortChange={changeSortOrder}
             onClose={() => setSidebarOpen(false)}
             connectedCount={connectedCount}
-            onOpenSettings={() => { setShowPairDevice(true); setSidebarOpen(false); }}
+            onOpenSettings={() => { setShowSettings(true); setSidebarOpen(false); }}
             onOpenPairDevice={() => { setShowPairDevice(true); setSidebarOpen(false); }}
           />
         </div>
@@ -355,25 +316,26 @@ export default function NotebookPage() {
         />
       )}
 
+      {/* Settings Modal */}
+      {showSettings && (
+        <SettingsModal onClose={() => setShowSettings(false)} />
+      )}
+
       {/* Responsive styles */}
       <style>{`
         .mobile-only   { display: none; }
         .desktop-only  { display: flex; }
-        .sidebar-mobile { display: none; }
-        .sidebar-desktop { display: flex; }
 
         @media (max-width: 820px) {
           .mobile-only    { display: flex !important; }
           .desktop-only   { display: none !important; }
-          .sidebar-mobile  { display: flex !important; }
-          .sidebar-desktop { display: none !important; }
         }
       `}</style>
     </div>
   );
 }
 
-/* ── Helpers ── */
+/* Helpers */
 
 function EmptyState({ onNewNote }: { onNewNote: () => void }) {
   return (
