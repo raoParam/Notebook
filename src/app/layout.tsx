@@ -7,6 +7,9 @@ export const metadata: Metadata = {
   description:
     'A local-first markdown notebook with live preview, drawing, image attachments, PDF export, and optional P2P device sync powered by Trystero WebRTC.',
   keywords: ['notebook', 'markdown', 'notes', 'sync', 'local-first', 'offline'],
+  icons: {
+    icon: '/icon.svg',
+  },
 };
 
 export const viewport: Viewport = {
