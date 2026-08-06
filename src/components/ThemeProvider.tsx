@@ -3,7 +3,7 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 export type BuiltInThemeId = 'light' | 'dark' | 'ocean' | 'dracula' | 'nord' | 'gruvbox';
-export type ThemeId = BuiltInThemeId | 'custom';
+export type ThemeId = string;
 
 export interface ThemeColors {
   bgApp: string;
@@ -18,6 +18,13 @@ export interface ThemeColors {
   inkMuted: string;
   hover: string;
   danger: string;
+}
+
+export interface CustomTheme {
+  id: string;
+  name: string;
+  isDark: boolean;
+  colors: ThemeColors;
 }
 
 export const THEME_PRESETS: Record<BuiltInThemeId, { name: string; isDark: boolean; colors: ThemeColors }> = {
@@ -169,15 +176,33 @@ export const FONT_OPTIONS = {
   ],
 };
 
+export interface ImportResult {
+  success: boolean;
+  error?: string;
+  themeName?: string;
+}
+
+export interface ExportResult {
+  jsonString: string;
+  filename: string;
+}
+
 interface ThemeContextType {
-  themeId: ThemeId;
+  themeId: string;
   activeColors: ThemeColors;
   customColors: ThemeColors;
+  customThemeName: string;
+  savedCustomThemes: CustomTheme[];
   fonts: FontSettings;
-  selectTheme: (id: ThemeId) => void;
+  selectTheme: (id: string) => void;
+  startCustomizingTheme: (id?: string) => void;
   updateCustomColor: (key: keyof ThemeColors, value: string) => void;
-  saveCustomTheme: () => void;
+  setCustomThemeName: (name: string) => void;
+  saveCustomTheme: (name?: string) => void;
+  deleteCustomTheme: (id: string) => void;
   resetCustomTheme: () => void;
+  importThemeFromJSON: (jsonString: string) => ImportResult;
+  exportThemeToJSON: (targetId?: string) => ExportResult;
   updateFont: (key: keyof FontSettings, value: string) => void;
   resetFonts: () => void;
 }
@@ -186,11 +211,18 @@ const ThemeContext = createContext<ThemeContextType>({
   themeId: 'light',
   activeColors: THEME_PRESETS.light.colors,
   customColors: THEME_PRESETS.light.colors,
+  customThemeName: 'My Custom Theme',
+  savedCustomThemes: [],
   fonts: DEFAULT_FONTS,
   selectTheme: () => {},
+  startCustomizingTheme: () => {},
   updateCustomColor: () => {},
+  setCustomThemeName: () => {},
   saveCustomTheme: () => {},
+  deleteCustomTheme: () => {},
   resetCustomTheme: () => {},
+  importThemeFromJSON: () => ({ success: false, error: 'Not implemented' }),
+  exportThemeToJSON: () => ({ jsonString: '', filename: 'theme.json' }),
   updateFont: () => {},
   resetFonts: () => {},
 });
@@ -229,21 +261,53 @@ function applyFontsToDOM(fonts: FontSettings) {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [themeId, setThemeId] = useState<ThemeId>('light');
+  const [themeId, setThemeId] = useState<string>('light');
+  const [savedCustomThemes, setSavedCustomThemes] = useState<CustomTheme[]>([]);
   const [customColors, setCustomColors] = useState<ThemeColors>(THEME_PRESETS.light.colors);
+  const [customThemeName, setCustomThemeName] = useState<string>('My Custom Theme');
   const [fonts, setFonts] = useState<FontSettings>(DEFAULT_FONTS);
+
+  // Helper to find colors and dark status for any given theme ID
+  const getThemeData = (id: string, currentCustomColors: ThemeColors, customList: CustomTheme[]) => {
+    if (id === 'custom-draft') {
+      return { colors: currentCustomColors, isDark: isColorDark(currentCustomColors.bgApp) };
+    }
+    const saved = customList.find((t) => t.id === id);
+    if (saved) {
+      return { colors: saved.colors, isDark: saved.isDark };
+    }
+    if (THEME_PRESETS[id as BuiltInThemeId]) {
+      const preset = THEME_PRESETS[id as BuiltInThemeId];
+      return { colors: preset.colors, isDark: preset.isDark };
+    }
+    if (id === 'custom') {
+      return { colors: currentCustomColors, isDark: isColorDark(currentCustomColors.bgApp) };
+    }
+    return { colors: THEME_PRESETS.light.colors, isDark: false };
+  };
 
   useEffect(() => {
     try {
-      const savedThemeId = localStorage.getItem('nb-theme-id') as ThemeId | null;
-      const savedCustom = localStorage.getItem('nb-custom-colors');
+      const savedThemeId = localStorage.getItem('nb-theme-id') || 'light';
+      const savedCustomColors = localStorage.getItem('nb-custom-colors');
+      const savedCustomListStr = localStorage.getItem('nb-saved-custom-themes');
       const savedFonts = localStorage.getItem('nb-fonts');
-      
-      let loadedCustom = THEME_PRESETS.light.colors;
-      if (savedCustom) {
+
+      let loadedCustomList: CustomTheme[] = [];
+      if (savedCustomListStr) {
         try {
-          loadedCustom = { ...THEME_PRESETS.light.colors, ...JSON.parse(savedCustom) };
-          setCustomColors(loadedCustom);
+          loadedCustomList = JSON.parse(savedCustomListStr);
+          if (Array.isArray(loadedCustomList)) {
+            setSavedCustomThemes(loadedCustomList);
+          }
+        } catch {}
+      }
+
+      let loadedCustomColors = THEME_PRESETS.light.colors;
+      if (savedCustomColors) {
+        try {
+          loadedCustomColors = { ...THEME_PRESETS.light.colors, ...JSON.parse(savedCustomColors) };
+          setCustomColors(loadedCustomColors);
         } catch {}
       }
 
@@ -255,75 +319,275 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         } catch {}
       }
 
-      const activeId: ThemeId = savedThemeId || 'light';
-      setThemeId(activeId);
+      setThemeId(savedThemeId);
 
-      let targetColors: ThemeColors;
-      let targetDark = false;
-
-      if (activeId === 'custom') {
-        targetColors = loadedCustom;
-        targetDark = isColorDark(loadedCustom.bgApp);
-      } else if (THEME_PRESETS[activeId as BuiltInThemeId]) {
-        targetColors = THEME_PRESETS[activeId as BuiltInThemeId].colors;
-        targetDark = THEME_PRESETS[activeId as BuiltInThemeId].isDark;
-      } else {
-        targetColors = THEME_PRESETS.light.colors;
-        targetDark = false;
+      const activeSaved = loadedCustomList.find((t) => t.id === savedThemeId);
+      if (activeSaved) {
+        setCustomColors(activeSaved.colors);
+        setCustomThemeName(activeSaved.name);
+      } else if (THEME_PRESETS[savedThemeId as BuiltInThemeId]) {
+        const p = THEME_PRESETS[savedThemeId as BuiltInThemeId];
+        setCustomColors(p.colors);
+        setCustomThemeName(`My ${p.name} Custom`);
       }
 
-      applyColorsToDOM(targetColors, targetDark);
+      const activeData = getThemeData(savedThemeId, loadedCustomColors, loadedCustomList);
+      applyColorsToDOM(activeData.colors, activeData.isDark);
       applyFontsToDOM(loadedFonts);
     } catch {}
   }, []);
 
-  const getActiveColors = (id: ThemeId, custom: ThemeColors): ThemeColors => {
-    if (id === 'custom') return custom;
-    return THEME_PRESETS[id as BuiltInThemeId]?.colors || THEME_PRESETS.light.colors;
-  };
+  const activeData = getThemeData(themeId, customColors, savedCustomThemes);
+  const activeColors = activeData.colors;
 
-  const activeColors = getActiveColors(themeId, customColors);
-
-  const selectTheme = (id: ThemeId) => {
+  const selectTheme = (id: string) => {
     setThemeId(id);
     try {
       localStorage.setItem('nb-theme-id', id);
     } catch {}
 
-    const colors = getActiveColors(id, customColors);
-    const isDark = id === 'custom' ? isColorDark(colors.bgApp) : THEME_PRESETS[id as BuiltInThemeId]?.isDark || false;
-    applyColorsToDOM(colors, isDark);
+    const data = getThemeData(id, customColors, savedCustomThemes);
+
+    setCustomColors(data.colors);
+    const preset = THEME_PRESETS[id as BuiltInThemeId];
+    if (preset) {
+      setCustomThemeName(`My ${preset.name} Custom`);
+    } else {
+      const saved = savedCustomThemes.find((t) => t.id === id);
+      if (saved) setCustomThemeName(saved.name);
+    }
+
+    applyColorsToDOM(data.colors, data.isDark);
+  };
+
+  const startCustomizingTheme = (id?: string) => {
+    const targetId = id || themeId;
+    const data = getThemeData(targetId, customColors, savedCustomThemes);
+    setCustomColors(data.colors);
+    setThemeId('custom-draft');
+    try {
+      localStorage.setItem('nb-theme-id', 'custom-draft');
+      localStorage.setItem('nb-custom-colors', JSON.stringify(data.colors));
+    } catch {}
+    applyColorsToDOM(data.colors, data.isDark);
   };
 
   const updateCustomColor = (key: keyof ThemeColors, value: string) => {
-    const updated = { ...customColors, [key]: value };
+    let baseColors = customColors;
+    if (themeId !== 'custom-draft' && THEME_PRESETS[themeId as BuiltInThemeId]) {
+      baseColors = THEME_PRESETS[themeId as BuiltInThemeId].colors;
+    } else if (themeId !== 'custom-draft') {
+      const saved = savedCustomThemes.find((t) => t.id === themeId);
+      if (saved) baseColors = saved.colors;
+    }
+
+    const updated = { ...baseColors, [key]: value };
     setCustomColors(updated);
-    setThemeId('custom');
+    setThemeId('custom-draft');
     try {
-      localStorage.setItem('nb-theme-id', 'custom');
+      localStorage.setItem('nb-theme-id', 'custom-draft');
       localStorage.setItem('nb-custom-colors', JSON.stringify(updated));
     } catch {}
     applyColorsToDOM(updated, isColorDark(updated.bgApp));
   };
 
-  const saveCustomTheme = () => {
-    setThemeId('custom');
+  const saveCustomTheme = (nameInput?: string) => {
+    const finalName = (nameInput || customThemeName).trim() || 'My Custom Theme';
+    setCustomThemeName(finalName);
+
+    const isDark = isColorDark(customColors.bgApp);
+
+    const existingIndex = savedCustomThemes.findIndex((t) => t.id === themeId);
+
+    let updatedList: CustomTheme[];
+    let newThemeId: string;
+
+    if (existingIndex >= 0) {
+      newThemeId = themeId;
+      updatedList = [...savedCustomThemes];
+      updatedList[existingIndex] = {
+        id: newThemeId,
+        name: finalName,
+        isDark,
+        colors: customColors,
+      };
+    } else {
+      newThemeId = `custom-${Date.now()}`;
+      const newTheme: CustomTheme = {
+        id: newThemeId,
+        name: finalName,
+        isDark,
+        colors: customColors,
+      };
+      updatedList = [newTheme, ...savedCustomThemes];
+    }
+
+    setSavedCustomThemes(updatedList);
+    setThemeId(newThemeId);
+
     try {
-      localStorage.setItem('nb-theme-id', 'custom');
+      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
+      localStorage.setItem('nb-theme-id', newThemeId);
       localStorage.setItem('nb-custom-colors', JSON.stringify(customColors));
     } catch {}
-    applyColorsToDOM(customColors, isColorDark(customColors.bgApp));
+
+    applyColorsToDOM(customColors, isDark);
+  };
+
+  const deleteCustomTheme = (id: string) => {
+    const updatedList = savedCustomThemes.filter((t) => t.id !== id);
+    setSavedCustomThemes(updatedList);
+    try {
+      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
+    } catch {}
+
+    if (themeId === id) {
+      selectTheme('light');
+    }
   };
 
   const resetCustomTheme = () => {
     const resetVal = THEME_PRESETS.light.colors;
     setCustomColors(resetVal);
+    setCustomThemeName('My Custom Theme');
     setThemeId('light');
     try {
       localStorage.setItem('nb-theme-id', 'light');
       localStorage.setItem('nb-custom-colors', JSON.stringify(resetVal));
     } catch {}
     applyColorsToDOM(resetVal, false);
+  };
+
+  const importThemeFromJSON = (jsonString: string): ImportResult => {
+    if (!jsonString || !jsonString.trim()) {
+      return {
+        success: false,
+        error: 'The uploaded file is empty. Please select a valid JSON theme file.',
+      };
+    }
+
+    let parsed: any;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch {
+      return {
+        success: false,
+        error: 'The file contains invalid JSON formatting. Please verify the file structure and try again.',
+      };
+    }
+
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return {
+        success: false,
+        error: 'The theme configuration structure is unrecognized. Please upload a valid theme file.',
+      };
+    }
+
+    const colorsObj = (parsed.colors && typeof parsed.colors === 'object') ? parsed.colors : parsed;
+
+    const getVal = (primaryKey: string, altKey?: string): string => {
+      const v = colorsObj[primaryKey] ?? (altKey ? colorsObj[altKey] : undefined);
+      return typeof v === 'string' && v.trim() ? v.trim() : '';
+    };
+
+    const bgApp = getVal('bgApp', 'bg_app') || getVal('background', 'bg');
+    const bgPaper = getVal('bgPaper', 'bg_paper') || getVal('surface', 'paper');
+    const bgSidebar = getVal('bgSidebar', 'bg_sidebar') || getVal('sidebar');
+    const accent = getVal('accent', 'primary');
+    const accentSoft = getVal('accentSoft', 'accent_soft') || getVal('secondary');
+    const gold = getVal('gold', 'accent_gold') || getVal('highlight');
+    const border = getVal('border', 'border_color');
+    const ink = getVal('ink', 'text') || getVal('foreground');
+    const inkSoft = getVal('inkSoft', 'ink_soft') || getVal('text_secondary');
+    const inkMuted = getVal('inkMuted', 'ink_muted') || getVal('text_muted');
+    const hover = getVal('hover', 'hover_bg');
+    const danger = getVal('danger', 'error');
+
+    // Ensure core colors are present
+    if (!bgApp || !accent || !ink) {
+      return {
+        success: false,
+        error: 'The theme file is missing essential color definitions (App Background, Accent, or Text color). Please select a complete theme file.',
+      };
+    }
+
+    const defaultBase = isColorDark(bgApp) ? THEME_PRESETS.dark.colors : THEME_PRESETS.light.colors;
+
+    const colors: ThemeColors = {
+      bgApp,
+      bgPaper: bgPaper || defaultBase.bgPaper,
+      bgSidebar: bgSidebar || defaultBase.bgSidebar,
+      accent,
+      accentSoft: accentSoft || defaultBase.accentSoft,
+      gold: gold || defaultBase.gold,
+      border: border || defaultBase.border,
+      ink,
+      inkSoft: inkSoft || defaultBase.inkSoft,
+      inkMuted: inkMuted || defaultBase.inkMuted,
+      hover: hover || defaultBase.hover,
+      danger: danger || defaultBase.danger,
+    };
+
+    const themeName = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'Imported Custom Theme';
+    const isDark = typeof parsed.isDark === 'boolean' ? parsed.isDark : isColorDark(colors.bgApp);
+
+    const newId = `custom-${Date.now()}`;
+    const newCustomTheme: CustomTheme = {
+      id: newId,
+      name: themeName,
+      isDark,
+      colors,
+    };
+
+    const updatedList = [newCustomTheme, ...savedCustomThemes];
+    setSavedCustomThemes(updatedList);
+    setCustomColors(colors);
+    setCustomThemeName(themeName);
+    setThemeId(newId);
+
+    try {
+      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
+      localStorage.setItem('nb-theme-id', newId);
+      localStorage.setItem('nb-custom-colors', JSON.stringify(colors));
+    } catch {}
+
+    applyColorsToDOM(colors, isDark);
+
+    return { success: true, themeName };
+  };
+
+  const exportThemeToJSON = (targetId?: string): ExportResult => {
+    const idToExport = targetId || themeId;
+    let exportName = customThemeName;
+    let colorsToExport = customColors;
+    let darkStatus = isColorDark(customColors.bgApp);
+
+    if (THEME_PRESETS[idToExport as BuiltInThemeId]) {
+      const preset = THEME_PRESETS[idToExport as BuiltInThemeId];
+      exportName = preset.name;
+      colorsToExport = preset.colors;
+      darkStatus = preset.isDark;
+    } else {
+      const saved = savedCustomThemes.find((t) => t.id === idToExport);
+      if (saved) {
+        exportName = saved.name;
+        colorsToExport = saved.colors;
+        darkStatus = saved.isDark;
+      }
+    }
+
+    const payload = {
+      name: exportName,
+      isDark: darkStatus,
+      colors: colorsToExport,
+    };
+
+    const safeName = exportName.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'theme';
+
+    return {
+      jsonString: JSON.stringify(payload, null, 2),
+      filename: `${safeName}-theme.json`,
+    };
   };
 
   const updateFont = (key: keyof FontSettings, value: string) => {
@@ -349,11 +613,18 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
         themeId,
         activeColors,
         customColors,
+        customThemeName,
+        savedCustomThemes,
         fonts,
         selectTheme,
+        startCustomizingTheme,
         updateCustomColor,
+        setCustomThemeName,
         saveCustomTheme,
+        deleteCustomTheme,
         resetCustomTheme,
+        importThemeFromJSON,
+        exportThemeToJSON,
         updateFont,
         resetFonts,
       }}
