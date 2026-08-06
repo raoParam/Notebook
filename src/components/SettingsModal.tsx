@@ -7,6 +7,7 @@ import {
   BuiltInThemeId,
   ThemeColors,
   FONT_OPTIONS,
+  cleanFont,
 } from '@/components/ThemeProvider';
 
 interface SettingsModalProps {
@@ -211,36 +212,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </div>
 
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            {/* Single Import Theme Button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setShowImportDialog(true);
-              }}
-              title="Import Theme"
-              style={actionHeaderBtnStyle}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-              Import Theme
-            </button>
-
-            {/* Single Export Theme Button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleExportJSON();
-              }}
-              title="Export Theme"
-              style={actionHeaderBtnStyle}
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
-              </svg>
-              Export Theme
-            </button>
-
             <button
               onClick={onClose}
               title="Close Settings"
@@ -527,15 +498,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         value={fonts.uiFont}
                         onChange={(e) => updateFont('uiFont', e.target.value)}
                         className="mobile-friendly-select"
-                        style={{ ...fontSelectStyle, fontFamily: fonts.uiFont }}
+                        style={{ ...fontSelectStyle, fontFamily: cleanFont(fonts.uiFont) }}
                       >
                         {FONT_OPTIONS.ui.map((opt) => (
-                          <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
+                          <option key={opt.value} value={opt.value} style={{ fontFamily: cleanFont(opt.value) }}>
                             {opt.label}
                           </option>
                         ))}
                       </select>
-                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.uiFont }}>
+                      <div style={{ ...fontPreviewStyle, fontFamily: cleanFont(fonts.uiFont) }}>
                         Aa Bb Cc 123 — Interface Preview
                       </div>
                     </div>
@@ -549,15 +520,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         value={fonts.serifFont}
                         onChange={(e) => updateFont('serifFont', e.target.value)}
                         className="mobile-friendly-select"
-                        style={{ ...fontSelectStyle, fontFamily: fonts.serifFont }}
+                        style={{ ...fontSelectStyle, fontFamily: cleanFont(fonts.serifFont) }}
                       >
                         {FONT_OPTIONS.serif.map((opt) => (
-                          <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
+                          <option key={opt.value} value={opt.value} style={{ fontFamily: cleanFont(opt.value) }}>
                             {opt.label}
                           </option>
                         ))}
                       </select>
-                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.serifFont }}>
+                      <div style={{ ...fontPreviewStyle, fontFamily: cleanFont(fonts.serifFont) }}>
                         Notebook — Title Heading Preview
                       </div>
                     </div>
@@ -571,15 +542,15 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         value={fonts.monoFont}
                         onChange={(e) => updateFont('monoFont', e.target.value)}
                         className="mobile-friendly-select"
-                        style={{ ...fontSelectStyle, fontFamily: fonts.monoFont }}
+                        style={{ ...fontSelectStyle, fontFamily: cleanFont(fonts.monoFont) }}
                       >
                         {FONT_OPTIONS.mono.map((opt) => (
-                          <option key={opt.value} value={opt.value} style={{ fontFamily: opt.value }}>
+                          <option key={opt.value} value={opt.value} style={{ fontFamily: cleanFont(opt.value) }}>
                             {opt.label}
                           </option>
                         ))}
                       </select>
-                      <div style={{ ...fontPreviewStyle, fontFamily: fonts.monoFont }}>
+                      <div style={{ ...fontPreviewStyle, fontFamily: cleanFont(fonts.monoFont) }}>
                         const note = &quot;Markdown&quot;;
                       </div>
                     </div>
@@ -734,7 +705,55 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                   </div>
 
                   {/* Actions Bar */}
-                  <div className="custom-theme-actions" style={{ display: 'flex', gap: 10, marginTop: 18, justifyContent: 'flex-end' }}>
+                  <div className="custom-theme-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginTop: 20, paddingTop: 16, borderTop: '1px solid var(--border)', justifyContent: 'flex-end', alignItems: 'center' }}>
+                    <button
+                      onClick={() => setShowImportDialog(true)}
+                      title="Import Theme"
+                      style={{
+                        padding: '8px 14px',
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: 'var(--ink)',
+                        background: 'var(--bg-paper)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+                      </svg>
+                      Import Theme
+                    </button>
+
+                    <button
+                      onClick={() => handleExportJSON()}
+                      title="Export Theme"
+                      style={{
+                        padding: '8px 14px',
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: 'var(--ink)',
+                        background: 'var(--bg-paper)',
+                        border: '1px solid var(--border)',
+                        borderRadius: 'var(--radius-sm)',
+                        cursor: 'pointer',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+                      </svg>
+                      Export Theme
+                    </button>
+
                     <button
                       onClick={resetCustomTheme}
                       style={{

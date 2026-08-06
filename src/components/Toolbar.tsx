@@ -11,6 +11,7 @@ export interface ToolbarProps {
   onExportMd: () => void;
   onToggleFullScreenWrite?: () => void;
   onToggleFullScreenPreview?: () => void;
+  onExitFullScreen?: () => void;
   fullScreenMode?: 'none' | 'write' | 'preview';
 }
 
@@ -85,6 +86,7 @@ export function Toolbar({
   onExportMd,
   onToggleFullScreenWrite,
   onToggleFullScreenPreview,
+  onExitFullScreen,
   fullScreenMode = 'none',
 }: ToolbarProps) {
   const imgRef = useRef<HTMLInputElement>(null);
@@ -106,15 +108,15 @@ export function Toolbar({
     [onImageUpload]
   );
 
-  const handleMdChange = useCallback(
+  const handleMdImport = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
       if (!file) return;
       const reader = new FileReader();
-      reader.onload = (ev) => {
-        const content = ev.target?.result as string;
-        const title = file.name.replace(/\.(md|markdown)$/i, '').trim() || 'Untitled';
-        onCommand(`__import__:${JSON.stringify({ title, content })}`);
+      reader.onload = (evt) => {
+        const text = evt.target?.result as string;
+        const title = file.name.replace(/\.md$/i, '');
+        onCommand(`__import__:${JSON.stringify({ title, content: text })}`);
       };
       reader.readAsText(file);
       e.target.value = '';
@@ -122,30 +124,17 @@ export function Toolbar({
     [onCommand]
   );
 
-  // Close ... menu when clicking outside or pressing Escape
   useEffect(() => {
-    if (!showMoreModal) return;
-
-    function handleClickOutside(e: MouseEvent | TouchEvent) {
+    function handleClickOutside(e: MouseEvent) {
       if (modalRef.current && !modalRef.current.contains(e.target as Node)) {
         setShowMoreModal(false);
       }
     }
-
-    function handleKeyDown(e: KeyboardEvent) {
-      if (e.key === 'Escape') {
-        setShowMoreModal(false);
-      }
+    if (showMoreModal) {
+      document.addEventListener('mousedown', handleClickOutside);
     }
-
-    document.addEventListener('mousedown', handleClickOutside);
-    document.addEventListener('touchstart', handleClickOutside);
-    document.addEventListener('keydown', handleKeyDown);
-
     return () => {
       document.removeEventListener('mousedown', handleClickOutside);
-      document.removeEventListener('touchstart', handleClickOutside);
-      document.removeEventListener('keydown', handleKeyDown);
     };
   }, [showMoreModal]);
 
@@ -154,101 +143,147 @@ export function Toolbar({
       style={{
         display: 'flex',
         alignItems: 'center',
-        flexWrap: 'wrap',
-        gap: 4,
-        padding: '6px 14px',
+        gap: 2,
+        padding: '5px 12px',
+        background: 'var(--bg-app)',
         borderBottom: '1px solid var(--border)',
-        borderTop: '1px solid var(--border)',
-        background: 'var(--bg-paper)',
         flexShrink: 0,
+        flexWrap: 'nowrap',
+        overflowX: 'auto',
       }}
     >
-      <input ref={imgRef} type="file" accept="image/*" style={{ display: 'none' }} onChange={handleImageChange} />
-      <input ref={mdRef} type="file" accept=".md,.markdown" style={{ display: 'none' }} onChange={handleMdChange} />
+      <input
+        ref={imgRef}
+        type="file"
+        accept="image/*"
+        onChange={handleImageChange}
+        style={{ display: 'none' }}
+      />
+      <input
+        ref={mdRef}
+        type="file"
+        accept=".md,.markdown,.txt"
+        onChange={handleMdImport}
+        style={{ display: 'none' }}
+      />
 
-      {/* Primary Desktop Tools (Hidden on small mobile screens to prevent clutter) */}
-      <div className="toolbar-desktop-tools" style={{ display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
-        {TOOLS.map((t, i) => {
-          if ('sep' in t && t.sep) {
+      {/* Formatting Tools */}
+      <div className="toolbar-desktop-tools" style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+        {TOOLS.map((item, idx) => {
+          if ('sep' in item) {
             return (
               <div
-                key={`sep-${i}`}
-                style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 2px', flexShrink: 0 }}
+                key={idx}
+                style={{
+                  width: 1,
+                  height: 16,
+                  background: 'var(--border)',
+                  margin: '0 4px',
+                }}
               />
             );
           }
-          const tool = t as {
-            cmd: string;
-            label?: string;
-            title: string;
-            icon?: React.ReactNode;
-            style?: React.CSSProperties;
-          };
+
           return (
-            <ToolBtn key={tool.cmd} title={tool.title} style={tool.style} onClick={() => onCommand(tool.cmd)}>
-              {tool.icon ?? tool.label}
-            </ToolBtn>
+            <button
+              key={item.cmd}
+              onClick={() => onCommand(item.cmd)}
+              title={item.title}
+              style={{
+                background: 'none',
+                border: 'none',
+                borderRadius: 'var(--radius-sm)',
+                cursor: 'pointer',
+                padding: '4px 7px',
+                fontWeight: 600,
+                color: 'var(--ink-soft)',
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                minWidth: 26,
+                height: 26,
+                transition: 'background 0.12s, color 0.12s',
+                ...('style' in item ? item.style : { fontSize: 13 }),
+              }}
+            >
+              {'icon' in item ? item.icon : item.label}
+            </button>
           );
         })}
 
-        <div style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 2px' }} />
+        <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
 
-        {/* Image */}
-        <ToolBtn title="Insert Image" onClick={() => imgRef.current?.click()}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-            <circle cx="8.5" cy="8.5" r="1.5" />
-            <polyline points="21 15 16 10 5 21" />
+        {/* Attachment & Drawing buttons */}
+        <button
+          onClick={() => imgRef.current?.click()}
+          title="Attach Image"
+          style={iconToolBtnStyle}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+            <circle cx="8.5" cy="8.5" r="1.5"/>
+            <polyline points="21 15 16 10 5 21"/>
           </svg>
-        </ToolBtn>
+        </button>
 
-        {/* Draw */}
-        <ToolBtn title="Drawing canvas" onClick={onToggleDrawing}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 19l7-7 3 3-7 7-3-3z" />
-            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18" />
-            <path d="M2 2l7.586 7.586" />
-            <circle cx="11" cy="11" r="2" />
+        <button
+          onClick={onToggleDrawing}
+          title="Draw / Canvas"
+          style={iconToolBtnStyle}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 19l7-7 3 3-7 7-3-3z"/>
+            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+            <path d="M2 2l7.586 7.586"/>
+            <circle cx="11" cy="11" r="2"/>
           </svg>
-        </ToolBtn>
-      </div>
+        </button>
 
-      {/* Mobile Streamlined Quick Bar (Only shown on mobile) */}
-      <div className="toolbar-mobile-quick" style={{ display: 'none', alignItems: 'center', gap: 4 }}>
-        <ToolBtn title="Bold" onClick={() => onCommand('bold')} style={{ fontWeight: 700 }}>
-          B
-        </ToolBtn>
-        <ToolBtn title="Italic" onClick={() => onCommand('italic')} style={{ fontStyle: 'italic' }}>
-          I
-        </ToolBtn>
-        <ToolBtn title="Heading 1" onClick={() => onCommand('h1')}>
-          H1
-        </ToolBtn>
-        <ToolBtn title="Insert Image" onClick={() => imgRef.current?.click()}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-            <circle cx="8.5" cy="8.5" r="1.5" />
-            <polyline points="21 15 16 10 5 21" />
-          </svg>
-        </ToolBtn>
-        <ToolBtn title="Drawing canvas" onClick={onToggleDrawing}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 19l7-7 3 3-7 7-3-3z" />
-            <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18" />
-          </svg>
-        </ToolBtn>
+        {/* Fullscreen icons */}
+        {onToggleFullScreenWrite && (
+          <button
+            onClick={onToggleFullScreenWrite}
+            title={fullScreenMode === 'write' ? 'Exit Full Screen Write' : 'Full Screen Editor'}
+            style={{
+              ...iconToolBtnStyle,
+              background: fullScreenMode === 'write' ? 'var(--hover)' : 'none',
+              color: fullScreenMode === 'write' ? 'var(--accent)' : 'var(--ink-soft)',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
+          </button>
+        )}
+
+        {onToggleFullScreenPreview && (
+          <button
+            onClick={onToggleFullScreenPreview}
+            title={fullScreenMode === 'preview' ? 'Exit Full Screen Preview' : 'Full Screen Preview'}
+            style={{
+              ...iconToolBtnStyle,
+              background: fullScreenMode === 'preview' ? 'var(--hover)' : 'none',
+              color: fullScreenMode === 'preview' ? 'var(--accent)' : 'var(--ink-soft)',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+              <circle cx="12" cy="12" r="3" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
 
-      {/* ... Button (ONLY visible in phone/mobile view) */}
+      {/* ... Button (ONLY visible in mobile view) */}
       <button
         className="mobile-tools-btn"
         onClick={() => setShowMoreModal(true)}
         title="More Tools (...)"
         style={{
-          display: 'none', // Controlled by CSS @media (max-width: 820px)
+          display: 'none',
           alignItems: 'center',
           gap: 4,
           padding: '5px 10px',
@@ -268,7 +303,7 @@ export function Toolbar({
         <span style={{ fontSize: 12, fontWeight: 600 }}>Tools</span>
       </button>
 
-      {/* Action buttons (Import, Export .md, Export PDF) */}
+      {/* Action buttons (Import, Export .md, Export PDF, Close Fullscreen) */}
       <div className="toolbar-actions-group" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <ActionBtn onClick={() => mdRef.current?.click()} title="Import .md file">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -312,6 +347,33 @@ export function Toolbar({
           </svg>
           PDF
         </button>
+
+        {/* Clean Close Fullscreen Button (Top Right Corner) */}
+        {fullScreenMode !== 'none' && onExitFullScreen && (
+          <button
+            onClick={onExitFullScreen}
+            title="Close Full Screen"
+            style={{
+              padding: '5px 8px',
+              background: 'var(--danger)',
+              color: '#FFFFFF',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginLeft: 6,
+              transition: 'opacity 0.15s',
+              flexShrink: 0,
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        )}
       </div>
 
       {/* Full Window Modal for "..." (More Options for phone view) */}
@@ -320,304 +382,143 @@ export function Toolbar({
           style={{
             position: 'fixed',
             inset: 0,
-            background: 'rgba(0, 0, 0, 0.5)',
-            backdropFilter: 'blur(4px)',
-            zIndex: 10000,
+            zIndex: 9999,
+            background: 'rgba(0, 0, 0, 0.45)',
+            backdropFilter: 'blur(3px)',
             display: 'flex',
-            alignItems: 'center',
+            alignItems: 'flex-end',
             justifyContent: 'center',
-            padding: 16,
           }}
           onClick={() => setShowMoreModal(false)}
         >
           <div
             ref={modalRef}
-            onClick={(e) => e.stopPropagation()}
             style={{
               width: '100%',
-              maxWidth: 440,
-              maxHeight: '85vh',
+              maxWidth: 480,
               background: 'var(--bg-paper)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius)',
-              boxShadow: 'var(--shadow)',
+              borderTopLeftRadius: 16,
+              borderTopRightRadius: 16,
+              padding: '16px 20px 24px',
+              boxShadow: '0 -4px 20px rgba(0,0,0,0.15)',
               display: 'flex',
               flexDirection: 'column',
-              overflow: 'hidden',
-              animation: 'modalIn 0.18s ease-out',
+              gap: 16,
+              animation: 'modalIn 0.2s ease-out',
             }}
+            onClick={(e) => e.stopPropagation()}
           >
-            {/* Modal Header */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                padding: '14px 18px',
-                borderBottom: '1px solid var(--border)',
-                background: 'var(--bg-app)',
-              }}
-            >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    width: 28,
-                    height: 28,
-                    borderRadius: 'var(--radius-sm)',
-                    background: 'var(--accent)',
-                    color: '#fff',
-                    fontWeight: 700,
-                    fontSize: 16,
-                  }}
-                >
-                  ⋯
-                </span>
-                <div>
-                  <h3 style={{ fontSize: 16, fontWeight: 600, color: 'var(--ink)', lineHeight: 1.2 }}>
-                    Markdown Tools & Actions
-                  </h3>
-                  <p style={{ fontSize: 12, color: 'var(--ink-muted)' }}>
-                    Tap anywhere outside to close
-                  </p>
-                </div>
-              </div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', paddingBottom: 10 }}>
+              <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--ink)' }}>
+                Editor Tools
+              </span>
               <button
                 onClick={() => setShowMoreModal(false)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  cursor: 'pointer',
-                  color: 'var(--ink-soft)',
-                  padding: 6,
-                  borderRadius: 'var(--radius-sm)',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                }}
-                title="Close menu"
+                style={{ background: 'none', border: 'none', color: 'var(--ink-soft)', cursor: 'pointer', padding: 4 }}
               >
-                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
+                ✕
               </button>
             </div>
 
-            {/* Modal Scrollable Body */}
-            <div
-              style={{
-                padding: 16,
-                overflowY: 'auto',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 16,
-              }}
-            >
-              {/* Category: Text Formatting */}
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-                  Formatting
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                  <ModalGridBtn label="Bold" icon="B" onClick={() => { onCommand('bold'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Italic" icon="I" onClick={() => { onCommand('italic'); setShowMoreModal(false); }} style={{ fontStyle: 'italic' }} />
-                  <ModalGridBtn label="Strike" icon="S" onClick={() => { onCommand('strikethrough'); setShowMoreModal(false); }} style={{ textDecoration: 'line-through' }} />
-                  <ModalGridBtn label="Code" icon="</>" onClick={() => { onCommand('code'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Quote" icon="”" onClick={() => { onCommand('quote'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Divider" icon="―" onClick={() => { onCommand('hr'); setShowMoreModal(false); }} />
-                </div>
-              </div>
+            {/* Quick Actions */}
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button
+                onClick={() => { setShowMoreModal(false); mdRef.current?.click(); }}
+                style={mobileActionBtnStyle}
+              >
+                Import .md
+              </button>
+              <button
+                onClick={() => { setShowMoreModal(false); onExportMd(); }}
+                style={mobileActionBtnStyle}
+              >
+                Download .md
+              </button>
+              <button
+                onClick={() => { setShowMoreModal(false); onExportPdf(); }}
+                style={{ ...mobileActionBtnStyle, background: 'var(--accent)', color: '#fff', border: 'none' }}
+              >
+                Export PDF
+              </button>
+            </div>
 
-              {/* Category: Headings & Lists */}
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-                  Structure
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                  <ModalGridBtn label="Heading 1" icon="H1" onClick={() => { onCommand('h1'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Heading 2" icon="H2" onClick={() => { onCommand('h2'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Heading 3" icon="H3" onClick={() => { onCommand('h3'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Bullet List" icon="•" onClick={() => { onCommand('ul'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Num List" icon="1." onClick={() => { onCommand('ol'); setShowMoreModal(false); }} />
-                  <ModalGridBtn label="Link" icon="🔗" onClick={() => { onCommand('link'); setShowMoreModal(false); }} />
-                </div>
-              </div>
-
-              {/* Category: Insert Media */}
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-                  Media & Canvas
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-                  <ModalGridBtn
-                    label="Insert Image"
-                    icon="📷"
-                    onClick={() => {
-                      imgRef.current?.click();
-                      setShowMoreModal(false);
-                    }}
-                  />
-                  <ModalGridBtn
-                    label="Drawing Canvas"
-                    icon="🎨"
-                    onClick={() => {
-                      onToggleDrawing();
-                      setShowMoreModal(false);
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Category: Full Screen Modes */}
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-                  Full Screen Modes
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 8 }}>
-                  {onToggleFullScreenWrite && (
-                    <ModalGridBtn
-                      label={fullScreenMode === 'write' ? 'Exit Full Write' : 'Full Screen Write'}
-                      icon="⛶"
-                      highlight
-                      onClick={() => {
-                        onToggleFullScreenWrite();
-                        setShowMoreModal(false);
-                      }}
-                    />
-                  )}
-                  {onToggleFullScreenPreview && (
-                    <ModalGridBtn
-                      label={fullScreenMode === 'preview' ? 'Exit Full Preview' : 'Full Screen Preview'}
-                      icon="👁️"
-                      highlight
-                      onClick={() => {
-                        onToggleFullScreenPreview();
-                        setShowMoreModal(false);
-                      }}
-                    />
-                  )}
-                </div>
-              </div>
-
-              {/* Category: File Operations */}
-              <div>
-                <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink-muted)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 8 }}>
-                  File & Export
-                </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                  <ModalGridBtn
-                    label="Import .md"
-                    icon="📂"
-                    onClick={() => {
-                      mdRef.current?.click();
-                      setShowMoreModal(false);
-                    }}
-                  />
-                  <ModalGridBtn
-                    label="Export .md"
-                    icon="💾"
-                    onClick={() => {
-                      onExportMd();
-                      setShowMoreModal(false);
-                    }}
-                  />
-                  <ModalGridBtn
-                    label="Export PDF"
-                    icon="📄"
-                    onClick={() => {
-                      onExportPdf();
-                      setShowMoreModal(false);
-                    }}
-                  />
-                </div>
-              </div>
+            {/* Formatting Tools Grid */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
+              {TOOLS.filter((t) => !('sep' in t)).map((item: any) => (
+                <button
+                  key={item.cmd}
+                  onClick={() => { setShowMoreModal(false); onCommand(item.cmd); }}
+                  style={mobileGridToolStyle}
+                  title={item.title}
+                >
+                  <span style={{ fontSize: 14 }}>{'icon' in item ? item.icon : item.label}</span>
+                  <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>{item.cmd.toUpperCase()}</span>
+                </button>
+              ))}
+              <button
+                onClick={() => { setShowMoreModal(false); imgRef.current?.click(); }}
+                style={mobileGridToolStyle}
+                title="Attach Image"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/>
+                </svg>
+                <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>IMAGE</span>
+              </button>
+              <button
+                onClick={() => { setShowMoreModal(false); onToggleDrawing(); }}
+                style={mobileGridToolStyle}
+                title="Draw Canvas"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
+                </svg>
+                <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>DRAW</span>
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Responsive Styles */}
+      {/* Responsive toolbar styles */}
       <style>{`
-        .mobile-tools-btn { display: none !important; }
         @media (max-width: 820px) {
           .toolbar-desktop-tools { display: none !important; }
-          .toolbar-mobile-quick  { display: flex !important; }
-          .toolbar-actions-group { display: none !important; }
-          .mobile-tools-btn { display: flex !important; }
+          .toolbar-actions-group { display: flex !important; }
+          .mobile-tools-btn       { display: flex !important; }
         }
       `}</style>
     </div>
   );
 }
 
-function ToolBtn({
-  children,
-  title,
-  style,
-  onClick,
-}: {
-  children: React.ReactNode;
-  title: string;
-  style?: React.CSSProperties;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      title={title}
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: 30,
-        height: 28,
-        border: '1px solid var(--border)',
-        background: 'var(--bg-sidebar)',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-        color: 'var(--ink-soft)',
-        fontSize: 13,
-        fontFamily: 'var(--font)',
-        transition: 'all 0.1s',
-        flexShrink: 0,
-        ...style,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
 function ActionBtn({
-  children,
   onClick,
   title,
+  children,
 }: {
-  children: React.ReactNode;
   onClick: () => void;
-  title?: string;
+  title: string;
+  children: React.ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
       style={{
-        padding: '6px 10px',
+        padding: '5px 10px',
+        background: 'transparent',
         border: '1px solid var(--border)',
         borderRadius: 'var(--radius-sm)',
-        background: 'var(--bg-paper)',
-        color: 'var(--ink-soft)',
         fontSize: 12,
         fontWeight: 500,
+        color: 'var(--ink-soft)',
         cursor: 'pointer',
         display: 'flex',
         alignItems: 'center',
-        gap: 5,
+        gap: 4,
         fontFamily: 'var(--font)',
-        transition: 'all 0.15s',
+        transition: 'background 0.12s, color 0.12s',
         flexShrink: 0,
       }}
     >
@@ -626,45 +527,41 @@ function ActionBtn({
   );
 }
 
-function ModalGridBtn({
-  label,
-  icon,
-  onClick,
-  style,
-  highlight = false,
-}: {
-  label: string;
-  icon: React.ReactNode;
-  onClick: () => void;
-  style?: React.CSSProperties;
-  highlight?: boolean;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        padding: '10px 8px',
-        gap: 4,
-        background: highlight ? 'var(--accent)' : 'var(--bg-sidebar)',
-        border: `1px solid ${highlight ? 'var(--accent)' : 'var(--border)'}`,
-        borderRadius: 'var(--radius-sm)',
-        color: highlight ? '#ffffff' : 'var(--ink)',
-        fontSize: 12,
-        fontWeight: 500,
-        cursor: 'pointer',
-        fontFamily: 'var(--font)',
-        transition: 'transform 0.1s ease, background 0.12s ease',
-        ...style,
-      }}
-    >
-      <span style={{ fontSize: 16, lineHeight: 1 }}>{icon}</span>
-      <span style={{ fontSize: 11, textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '100%' }}>
-        {label}
-      </span>
-    </button>
-  );
-}
+const iconToolBtnStyle: React.CSSProperties = {
+  background: 'none',
+  border: 'none',
+  borderRadius: 'var(--radius-sm)',
+  cursor: 'pointer',
+  padding: '4px 6px',
+  color: 'var(--ink-soft)',
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  transition: 'background 0.12s, color 0.12s',
+};
+
+const mobileActionBtnStyle: React.CSSProperties = {
+  flex: 1,
+  padding: '8px 10px',
+  fontSize: 12.5,
+  fontWeight: 500,
+  background: 'var(--bg-app)',
+  color: 'var(--ink)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-sm)',
+  cursor: 'pointer',
+  textAlign: 'center',
+};
+
+const mobileGridToolStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: '10px 4px',
+  background: 'var(--bg-app)',
+  border: '1px solid var(--border)',
+  borderRadius: 'var(--radius-sm)',
+  cursor: 'pointer',
+  color: 'var(--ink)',
+};

@@ -144,34 +144,39 @@ export interface FontSettings {
   monoFont: string;
 }
 
+export function cleanFont(val?: string): string {
+  if (!val) return 'sans-serif';
+  return val.replace(/['"]/g, '').trim();
+}
+
 export const DEFAULT_FONTS: FontSettings = {
-  uiFont: "'Poppins', sans-serif",
-  serifFont: "'Source Serif 4', serif",
-  monoFont: "'JetBrains Mono', monospace",
+  uiFont: "Poppins, sans-serif",
+  serifFont: "Source Serif 4, serif",
+  monoFont: "JetBrains Mono, monospace",
 };
 
 export const FONT_OPTIONS = {
   ui: [
-    { label: 'Poppins (Professional Modern)', value: "'Poppins', sans-serif" },
-    { label: 'Plus Jakarta Sans', value: "'Plus Jakarta Sans', sans-serif" },
-    { label: 'Inter (Clean Tech)', value: "'Inter', sans-serif" },
-    { label: 'Roboto (Classic)', value: "'Roboto', sans-serif" },
-    { label: 'Outfit (Sleek Geometric)', value: "'Outfit', sans-serif" },
+    { label: 'Poppins (Professional Modern)', value: "Poppins, sans-serif" },
+    { label: 'Plus Jakarta Sans', value: "Plus Jakarta Sans, sans-serif" },
+    { label: 'Inter (Clean Tech)', value: "Inter, sans-serif" },
+    { label: 'Roboto (Classic)', value: "Roboto, sans-serif" },
+    { label: 'Outfit (Sleek Geometric)', value: "Outfit, sans-serif" },
     { label: 'System UI', value: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
   ],
   serif: [
-    { label: 'Source Serif 4 (Classic Serif)', value: "'Source Serif 4', serif" },
-    { label: 'Lora (Editorial Elegance)', value: "'Lora', serif" },
-    { label: 'Poppins (Modern Clean)', value: "'Poppins', sans-serif" },
-    { label: 'Merriweather', value: "'Merriweather', serif" },
-    { label: 'Playfair Display', value: "'Playfair Display', serif" },
+    { label: 'Source Serif 4 (Classic Serif)', value: "Source Serif 4, serif" },
+    { label: 'Lora (Editorial Elegance)', value: "Lora, serif" },
+    { label: 'Poppins (Modern Clean)', value: "Poppins, sans-serif" },
+    { label: 'Merriweather', value: "Merriweather, serif" },
+    { label: 'Playfair Display', value: "Playfair Display, serif" },
     { label: 'Georgia', value: "Georgia, serif" },
   ],
   mono: [
-    { label: 'JetBrains Mono (Default Code)', value: "'JetBrains Mono', monospace" },
-    { label: 'Fira Code (Developer)', value: "'Fira Code', monospace" },
-    { label: 'Space Mono (Modern Tech)', value: "'Space Mono', monospace" },
-    { label: 'Courier Prime (Typewriter)', value: "'Courier Prime', monospace" },
+    { label: 'JetBrains Mono (Default Code)', value: "JetBrains Mono, monospace" },
+    { label: 'Fira Code (Developer)', value: "Fira Code, monospace" },
+    { label: 'Space Mono (Modern Tech)', value: "Space Mono, monospace" },
+    { label: 'Courier Prime (Typewriter)', value: "Courier Prime, monospace" },
     { label: 'Consolas', value: "Consolas, monospace" },
   ],
 };
@@ -253,11 +258,15 @@ function applyColorsToDOM(colors: ThemeColors, isDark: boolean) {
 
 function applyFontsToDOM(fonts: FontSettings) {
   if (typeof document === 'undefined') return;
+  const ui = cleanFont(fonts.uiFont);
+  const serif = cleanFont(fonts.serifFont);
+  const mono = cleanFont(fonts.monoFont);
+
   const root = document.documentElement;
-  root.style.setProperty('--font', fonts.uiFont);
-  root.style.setProperty('--serif-font', fonts.serifFont);
-  root.style.setProperty('--mono-font', fonts.monoFont);
-  document.body.style.fontFamily = fonts.uiFont;
+  root.style.setProperty('--font', ui);
+  root.style.setProperty('--serif-font', serif);
+  root.style.setProperty('--mono-font', mono);
+  document.body.style.fontFamily = ui;
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
@@ -314,7 +323,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       let loadedFonts = DEFAULT_FONTS;
       if (savedFonts) {
         try {
-          loadedFonts = { ...DEFAULT_FONTS, ...JSON.parse(savedFonts) };
+          const parsed = JSON.parse(savedFonts);
+          loadedFonts = {
+            uiFont: cleanFont(parsed.uiFont || DEFAULT_FONTS.uiFont),
+            serifFont: cleanFont(parsed.serifFont || DEFAULT_FONTS.serifFont),
+            monoFont: cleanFont(parsed.monoFont || DEFAULT_FONTS.monoFont),
+          };
           setFonts(loadedFonts);
         } catch {}
       }
@@ -503,7 +517,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const hover = getVal('hover', 'hover_bg');
     const danger = getVal('danger', 'error');
 
-    // Ensure core colors are present
     if (!bgApp || !accent || !ink) {
       return {
         success: false,
@@ -591,7 +604,8 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   };
 
   const updateFont = (key: keyof FontSettings, value: string) => {
-    const updated = { ...fonts, [key]: value };
+    const cleaned = cleanFont(value);
+    const updated = { ...fonts, [key]: cleaned };
     setFonts(updated);
     try {
       localStorage.setItem('nb-fonts', JSON.stringify(updated));

@@ -322,81 +322,19 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         </div>
       )}
 
-      {/* Toolbar (Only shown when not in preview-only full screen mode) */}
-      {fullScreenMode !== 'preview' && (
-        <Toolbar
-          onCommand={handleCommand}
-          onImageUpload={handleImageUpload}
-          onToggleDrawing={() => setShowDrawing((v) => !v)}
-          onOpenMd={() => {}}
-          onExportPdf={onExportPdf}
-          onExportMd={onExportMd}
-          onToggleFullScreenWrite={toggleFullScreenWrite}
-          onToggleFullScreenPreview={toggleFullScreenPreview}
-          fullScreenMode={fullScreenMode}
-        />
-      )}
-
-      {/* Fullscreen Header Bar (Shown in Fullscreen Preview or Write mode) */}
-      {isFullScreen && (
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            padding: '8px 16px',
-            background: 'var(--bg-app)',
-            borderBottom: '1px solid var(--border)',
-            flexShrink: 0,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span
-              style={{
-                fontSize: 12,
-                fontWeight: 600,
-                padding: '3px 8px',
-                borderRadius: 'var(--radius-sm)',
-                background: 'var(--accent)',
-                color: '#fff',
-                textTransform: 'uppercase',
-                letterSpacing: '0.5px',
-              }}
-            >
-              Fullscreen {fullScreenMode === 'write' ? 'Writing' : 'Preview'}
-            </span>
-            <span style={{ fontSize: 13, color: 'var(--ink-muted)', fontStyle: 'italic' }}>
-              Press ESC or click Exit to return
-            </span>
-          </div>
-
-          <button
-            onClick={() => setFullScreenMode('none')}
-            title="Exit Full Screen (Esc)"
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 6,
-              padding: '6px 12px',
-              background: 'var(--danger)',
-              color: '#fff',
-              border: 'none',
-              borderRadius: 'var(--radius-sm)',
-              fontSize: 12,
-              fontWeight: 600,
-              cursor: 'pointer',
-              fontFamily: 'var(--font)',
-              transition: 'opacity 0.15s',
-            }}
-          >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-            Exit Full Screen
-          </button>
-        </div>
-      )}
+      {/* Toolbar */}
+      <Toolbar
+        onCommand={handleCommand}
+        onImageUpload={handleImageUpload}
+        onToggleDrawing={() => setShowDrawing((v) => !v)}
+        onOpenMd={() => {}}
+        onExportPdf={onExportPdf}
+        onExportMd={onExportMd}
+        onToggleFullScreenWrite={toggleFullScreenWrite}
+        onToggleFullScreenPreview={toggleFullScreenPreview}
+        onExitFullScreen={() => setFullScreenMode('none')}
+        fullScreenMode={fullScreenMode}
+      />
 
       {/* Drawing panel */}
       {showDrawing && (
