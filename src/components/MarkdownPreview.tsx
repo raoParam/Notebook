@@ -23,7 +23,7 @@ export function MarkdownPreview({ note }: MarkdownPreviewProps) {
         position: 'absolute',
         inset: 0,
         overflowY: 'auto',
-        padding: '16px 24px',
+        padding: '16px 24px 140px', // Extra bottom space for phone browser status bar
         background: 'var(--bg-paper)',
         color: 'var(--ink)',
       }}
@@ -74,11 +74,6 @@ async function renderContent(note: Note): Promise<string> {
   }
 
   // Sanitize the rendered HTML before injecting it into the DOM.
-  // Notes can arrive via P2P sync or .md import, so malicious markup
-  // (e.g. <script>, onerror handlers) must be stripped. KaTeX emits
-  // MathML tags — including semantics/annotation, which DOMPurify
-  // disallows by default — so they are explicitly allowed to keep math
-  // rendering intact.
   const { default: DOMPurify } = await import('dompurify');
   return DOMPurify.sanitize(html, {
     ADD_TAGS: [

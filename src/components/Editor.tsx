@@ -20,6 +20,7 @@ interface EditorProps {
 }
 
 type MobileTab = 'write' | 'preview';
+type FullScreenMode = 'none' | 'write' | 'preview';
 
 function resizeImageFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -73,20 +74,14 @@ function uniqueLabel(
 export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }: EditorProps) {
   const taRef = useRef<HTMLTextAreaElement>(null);
   const [mobileTab, setMobileTab] = useState<MobileTab>('write');
+  const [fullScreenMode, setFullScreenMode] = useState<FullScreenMode>('none');
   const [showDrawing, setShowDrawing] = useState(false);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
   const noteIdRef = useRef(note.id);
-  // Last title/content this editor itself wrote back to the note, used to tell
-  // apart the round-trip of our own debounced save from a real external update.
   const lastWrittenRef = useRef({ title: note.title, content: note.content });
 
-  // Sync local state when the note changes. Besides switching notes (note.id),
-  // this also picks up external updates to the SAME note (e.g. incoming P2P sync).
-  // We only resync when the incoming note differs from what THIS editor last wrote
-  // back; when it matches our own last write it's just the round-trip of our own
-  // debounced save, which must not clobber in-progress typing.
   useEffect(() => {
     if (note.id !== noteIdRef.current) {
       noteIdRef.current = note.id;
@@ -94,14 +89,12 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       setTitle(note.title);
       setContent(note.content);
       setShowDrawing(false);
+      setFullScreenMode('none');
       return;
     }
 
     const last = lastWrittenRef.current;
     if (note.title !== last.title || note.content !== last.content) {
-      // External change (incoming sync / another device). Cancel any pending
-      // debounced save so stale local content doesn't overwrite it, then adopt
-      // the fresh note state.
       if (saveTimeout.current) {
         clearTimeout(saveTimeout.current);
         saveTimeout.current = null;
@@ -111,6 +104,17 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       setContent(note.content);
     }
   }, [note.id, note.title, note.content]);
+
+  // Press ESC to exit full screen mode
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape' && fullScreenMode !== 'none') {
+        setFullScreenMode('none');
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [fullScreenMode]);
 
   const scheduleUpdate = useCallback(
     (patch: Partial<Pick<Note, 'title' | 'content'>>) => {
@@ -140,6 +144,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   /* ── Markdown insertion helpers ── */
   function insertAround(before: string, after: string, placeholder: string) {
     const ta = taRef.current!;
+    if (!ta) return;
     const { selectionStart: s, selectionEnd: e, value } = ta;
     const selected = value.substring(s, e) || placeholder;
     const next = value.slice(0, s) + before + selected + after + value.slice(e);
@@ -152,6 +157,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function insertAtLine(prefix: string) {
     const ta = taRef.current!;
+    if (!ta) return;
     const { selectionStart: s, value } = ta;
     const lineStart = value.lastIndexOf('\n', s - 1) + 1;
     const next = value.slice(0, lineStart) + prefix + value.slice(lineStart);
@@ -164,6 +170,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function insertFull(before: string, after: string, placeholder: string) {
     const ta = taRef.current!;
+    if (!ta) return;
     const { selectionStart: s, selectionEnd: e, value } = ta;
     const selected = value.substring(s, e) || placeholder;
     const next = value.slice(0, s) + before + selected + after + value.slice(e);
@@ -178,6 +185,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function insertText(text: string) {
     const ta = taRef.current!;
+    if (!ta) return;
     const { selectionStart: s, selectionEnd: e, value } = ta;
     const before = s > 0 && value[s - 1] !== '\n' ? '\n' : '';
     const after = value[e] && value[e] !== '\n' ? '\n' : '';
@@ -258,44 +266,137 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content, title]);
 
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: 'var(--bg-paper)' }}>
-      {/* Title */}
-      <div style={{ padding: '12px 18px 6px', flexShrink: 0, display: 'flex', alignItems: 'center' }} className="note-title-container">
-        <input
-          value={title}
-          onChange={handleTitleChange}
-          placeholder="Untitled note title…"
-          spellCheck={false}
-          autoComplete="off"
-          className="note-title-input"
-          style={{
-            width: title ? `${Math.max(title.length + 3, 12)}ch` : '18ch',
-            maxWidth: '100%',
-            minWidth: '120px',
-            padding: '8px 14px',
-            fontSize: 20,
-            fontWeight: 600,
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            outline: 'none',
-            background: 'var(--bg-app)',
-            color: 'var(--ink)',
-            fontFamily: 'var(--serif-font)',
-            transition: 'border-color 0.15s ease, box-shadow 0.15s ease, width 0.1s ease',
-          }}
-        />
-      </div>
+  const toggleFullScreenWrite = () => {
+    setFullScreenMode((prev) => (prev === 'write' ? 'none' : 'write'));
+  };
 
-      {/* Toolbar */}
-      <Toolbar
-        onCommand={handleCommand}
-        onImageUpload={handleImageUpload}
-        onToggleDrawing={() => setShowDrawing((v) => !v)}
-        onOpenMd={() => {}}
-        onExportPdf={onExportPdf}
-        onExportMd={onExportMd}
-      />
+  const toggleFullScreenPreview = () => {
+    setFullScreenMode((prev) => (prev === 'preview' ? 'none' : 'preview'));
+  };
+
+  const isFullScreen = fullScreenMode !== 'none';
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        overflow: 'hidden',
+        background: 'var(--bg-paper)',
+        ...(isFullScreen
+          ? {
+              position: 'fixed',
+              inset: 0,
+              zIndex: 9999,
+            }
+          : {}),
+      }}
+    >
+      {/* Notebook Title (Hidden in Fullscreen Mode) */}
+      {!isFullScreen && (
+        <div style={{ padding: '12px 18px 6px', flexShrink: 0, display: 'flex', alignItems: 'center' }} className="note-title-container">
+          <input
+            value={title}
+            onChange={handleTitleChange}
+            placeholder="Untitled note title…"
+            spellCheck={false}
+            autoComplete="off"
+            className="note-title-input"
+            style={{
+              width: title ? `${Math.max(title.length + 3, 12)}ch` : '18ch',
+              maxWidth: '100%',
+              minWidth: '120px',
+              padding: '8px 14px',
+              fontSize: 20,
+              fontWeight: 600,
+              border: '1px solid var(--border)',
+              borderRadius: 'var(--radius-sm)',
+              outline: 'none',
+              background: 'var(--bg-app)',
+              color: 'var(--ink)',
+              fontFamily: 'var(--serif-font)',
+              transition: 'border-color 0.15s ease, box-shadow 0.15s ease, width 0.1s ease',
+            }}
+          />
+        </div>
+      )}
+
+      {/* Toolbar (Only shown when not in preview-only full screen mode) */}
+      {fullScreenMode !== 'preview' && (
+        <Toolbar
+          onCommand={handleCommand}
+          onImageUpload={handleImageUpload}
+          onToggleDrawing={() => setShowDrawing((v) => !v)}
+          onOpenMd={() => {}}
+          onExportPdf={onExportPdf}
+          onExportMd={onExportMd}
+          onToggleFullScreenWrite={toggleFullScreenWrite}
+          onToggleFullScreenPreview={toggleFullScreenPreview}
+          fullScreenMode={fullScreenMode}
+        />
+      )}
+
+      {/* Fullscreen Header Bar (Shown in Fullscreen Preview or Write mode) */}
+      {isFullScreen && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            padding: '8px 16px',
+            background: 'var(--bg-app)',
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                padding: '3px 8px',
+                borderRadius: 'var(--radius-sm)',
+                background: 'var(--accent)',
+                color: '#fff',
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+              }}
+            >
+              Fullscreen {fullScreenMode === 'write' ? 'Writing' : 'Preview'}
+            </span>
+            <span style={{ fontSize: 13, color: 'var(--ink-muted)', fontStyle: 'italic' }}>
+              Press ESC or click Exit to return
+            </span>
+          </div>
+
+          <button
+            onClick={() => setFullScreenMode('none')}
+            title="Exit Full Screen (Esc)"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '6px 12px',
+              background: 'var(--danger)',
+              color: '#fff',
+              border: 'none',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: 'pointer',
+              fontFamily: 'var(--font)',
+              transition: 'opacity 0.15s',
+            }}
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+            Exit Full Screen
+          </button>
+        </div>
+      )}
 
       {/* Drawing panel */}
       {showDrawing && (
@@ -305,43 +406,112 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         />
       )}
 
-      {/* Mobile tabs */}
-      <div className="mobile-tabs" style={{ display: 'none', gap: 4, padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-paper)', flexShrink: 0 }}>
-        {(['write', 'preview'] as MobileTab[]).map((tab) => (
+      {/* Mobile tabs (Hidden in Fullscreen Mode) */}
+      {!isFullScreen && (
+        <div className="mobile-tabs" style={{ display: 'none', gap: 4, padding: '8px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg-paper)', flexShrink: 0, alignItems: 'center' }}>
+          {(['write', 'preview'] as MobileTab[]).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setMobileTab(tab)}
+              style={{
+                flex: 1,
+                padding: '7px 14px',
+                background: mobileTab === tab ? 'var(--accent)' : 'var(--bg-sidebar)',
+                border: `1px solid ${mobileTab === tab ? 'var(--accent)' : 'var(--border)'}`,
+                borderRadius: 'var(--radius-sm)',
+                color: mobileTab === tab ? '#fff' : 'var(--ink-soft)',
+                fontSize: 13,
+                fontWeight: 500,
+                cursor: 'pointer',
+                fontFamily: 'var(--font)',
+                transition: 'all 0.15s',
+              }}
+            >
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
           <button
-            key={tab}
-            onClick={() => setMobileTab(tab)}
+            onClick={mobileTab === 'write' ? toggleFullScreenWrite : toggleFullScreenPreview}
+            title={`Full Screen ${mobileTab.charAt(0).toUpperCase() + mobileTab.slice(1)}`}
             style={{
-              flex: 1,
-              padding: '7px 14px',
-              background: mobileTab === tab ? 'var(--accent)' : 'var(--bg-sidebar)',
-              border: `1px solid ${mobileTab === tab ? 'var(--accent)' : 'var(--border)'}`,
+              padding: '7px 10px',
+              background: 'var(--bg-app)',
+              border: '1px solid var(--border)',
               borderRadius: 'var(--radius-sm)',
-              color: mobileTab === tab ? '#fff' : 'var(--ink-soft)',
+              color: 'var(--ink)',
               fontSize: 13,
               fontWeight: 500,
               cursor: 'pointer',
-              fontFamily: 'var(--font)',
-              transition: 'all 0.15s',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
             }}
           >
-            {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+            </svg>
           </button>
-        ))}
-      </div>
+        </div>
+      )}
 
-      {/* Editor body — split pane on desktop, single pane on mobile */}
+      {/* Editor body — split pane on desktop, single pane on mobile, or full screen single pane */}
       <div style={{ flex: 1, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
-        {/* Write pane */}
+        {/* Write pane (Hidden if in preview-only full screen mode) */}
         <div
           style={{
-            flex: '0 0 50%',
+            flex: fullScreenMode === 'write' ? '1 1 100%' : '0 0 50%',
             minWidth: 0,
             position: 'relative',
             overflow: 'hidden',
+            display:
+              fullScreenMode === 'preview'
+                ? 'none'
+                : fullScreenMode === 'write'
+                ? 'block'
+                : undefined, // handled by CSS media queries on mobile
           }}
-          className="write-pane"
+          className={`write-pane ${fullScreenMode === 'write' ? 'fullscreen-active' : ''}`}
         >
+          {/* Pane Control Header (Desktop split view only) */}
+          {!isFullScreen && (
+            <div
+              className="pane-header-bar desktop-only-pane-header"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '4px 14px',
+                background: 'var(--bg-app)',
+                borderBottom: '1px solid var(--border)',
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--ink-muted)',
+                letterSpacing: '0.5px',
+                textTransform: 'uppercase',
+              }}
+            >
+              <span>Markdown Editor</span>
+              <button
+                onClick={toggleFullScreenWrite}
+                title="Full Screen Editor"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--ink-soft)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: 2,
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                </svg>
+              </button>
+            </div>
+          )}
+
           <textarea
             ref={taRef}
             value={content}
@@ -350,10 +520,12 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
             spellCheck={false}
             style={{
               position: 'absolute',
-              inset: 0,
+              top: !isFullScreen ? 26 : 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
               width: '100%',
-              height: '100%',
-              padding: '16px 24px',
+              padding: '16px 24px 140px', // Extra bottom space (140px) so phone user can scroll past browser status bar
               border: 'none',
               outline: 'none',
               resize: 'none',
@@ -367,18 +539,75 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
           />
         </div>
 
-        {/* Preview pane */}
+        {/* Preview pane (Hidden if in write-only full screen mode) */}
         <div
           style={{
-            flex: '0 0 50%',
+            flex: fullScreenMode === 'preview' ? '1 1 100%' : '0 0 50%',
             minWidth: 0,
             position: 'relative',
             overflow: 'hidden',
-            borderLeft: '1px solid var(--border)',
+            borderLeft: fullScreenMode === 'preview' ? 'none' : '1px solid var(--border)',
+            display:
+              fullScreenMode === 'write'
+                ? 'none'
+                : fullScreenMode === 'preview'
+                ? 'block'
+                : undefined, // handled by CSS media queries on mobile
           }}
-          className="preview-pane"
+          className={`preview-pane ${fullScreenMode === 'preview' ? 'fullscreen-active' : ''}`}
         >
-          <MarkdownPreview note={{ ...note, content }} />
+          {/* Pane Control Header (Desktop split view only) */}
+          {!isFullScreen && (
+            <div
+              className="pane-header-bar desktop-only-pane-header"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                padding: '4px 14px',
+                background: 'var(--bg-app)',
+                borderBottom: '1px solid var(--border)',
+                fontSize: 11,
+                fontWeight: 600,
+                color: 'var(--ink-muted)',
+                letterSpacing: '0.5px',
+                textTransform: 'uppercase',
+              }}
+            >
+              <span>Live Preview</span>
+              <button
+                onClick={toggleFullScreenPreview}
+                title="Full Screen Preview"
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--ink-soft)',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  padding: 2,
+                  borderRadius: 'var(--radius-sm)',
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                </svg>
+              </button>
+            </div>
+          )}
+
+          <div
+            style={{
+              position: 'absolute',
+              top: !isFullScreen ? 26 : 0,
+              left: 0,
+              right: 0,
+              bottom: 0,
+              overflowY: 'auto',
+            }}
+          >
+            <MarkdownPreview note={{ ...note, content }} />
+          </div>
         </div>
       </div>
 
@@ -399,9 +628,17 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         @media (max-width: 820px) {
           .note-title-container { padding: 10px 12px 4px !important; }
           .note-title-input { padding: 8px 12px !important; font-size: 18px !important; }
-          .mobile-tabs { display: flex !important; }
-          .write-pane  { flex: 0 0 100% !important; display: ${mobileTab === 'write' ? 'block' : 'none'} !important; }
-          .preview-pane { flex: 0 0 100% !important; border-left: none !important; display: ${mobileTab === 'preview' ? 'block' : 'none'} !important; }
+          .desktop-only-pane-header { display: none !important; }
+          .mobile-tabs { display: ${isFullScreen ? 'none' : 'flex'} !important; }
+          .write-pane  {
+            flex: 0 0 100% !important;
+            display: ${fullScreenMode === 'preview' ? 'none' : fullScreenMode === 'write' ? 'block' : mobileTab === 'write' ? 'block' : 'none'} !important;
+          }
+          .preview-pane {
+            flex: 0 0 100% !important;
+            border-left: none !important;
+            display: ${fullScreenMode === 'write' ? 'none' : fullScreenMode === 'preview' ? 'block' : mobileTab === 'preview' ? 'block' : 'none'} !important;
+          }
         }
       `}</style>
     </div>

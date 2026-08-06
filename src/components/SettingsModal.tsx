@@ -7,7 +7,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type SettingsTab = 'appearance' | 'sync';
+type SettingsTab = 'appearance';
 
 const COLOR_FIELDS: { key: keyof ThemeColors; label: string; cssVar: string }[] = [
   { key: 'bgApp', label: 'App Background', cssVar: '--bg-app' },
@@ -25,7 +25,7 @@ const COLOR_FIELDS: { key: keyof ThemeColors; label: string; cssVar: string }[] 
 ];
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
-  const [activeTab, setActiveTab] = useState<SettingsTab>('appearance');
+  const [activeTab] = useState<SettingsTab>('appearance');
   const {
     themeId,
     activeColors,
@@ -87,7 +87,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
               <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
             <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--ink)' }}>
-              Settings
+              Settings & Themes
             </h2>
           </div>
           <button
@@ -101,7 +101,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
           </button>
         </div>
 
-        {/* Modal Body with Sidebar Tabs */}
+        {/* Modal Body */}
         <div className="settings-modal-body" style={{ display: 'flex', flex: 1, minHeight: 0, overflow: 'hidden' }}>
           {/* Settings Nav Tabs */}
           <div
@@ -118,13 +118,12 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             }}
           >
             <button
-              onClick={() => setActiveTab('appearance')}
               style={{
                 ...navTabStyle,
-                background: activeTab === 'appearance' ? 'var(--bg-paper)' : 'transparent',
-                color: activeTab === 'appearance' ? 'var(--accent)' : 'var(--ink-soft)',
-                fontWeight: activeTab === 'appearance' ? 600 : 400,
-                boxShadow: activeTab === 'appearance' ? 'var(--shadow-sm)' : 'none',
+                background: 'var(--bg-paper)',
+                color: 'var(--accent)',
+                fontWeight: 600,
+                boxShadow: 'var(--shadow-sm)',
               }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -185,7 +184,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                             )}
                           </div>
 
-                          {/* Color dots preview */}
                           <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
                             <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.bgApp, border: '1px solid var(--border)' }} title="App Background" />
                             <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.bgSidebar, border: '1px solid var(--border)' }} title="Sidebar" />
@@ -206,13 +204,13 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     <div>
                       <h3 style={sectionTitleStyle}>Typography & Fonts</h3>
                       <p style={sectionDescStyle}>
-                        Choose custom font families for application interface, note titles, and editor code.
+                        Select professional fonts for app interface, headings, and code. Works seamlessly on phone & desktop.
                       </p>
                     </div>
                     <button
                       onClick={resetFonts}
                       style={{
-                        padding: '4px 10px',
+                        padding: '5px 12px',
                         fontSize: 12,
                         fontWeight: 500,
                         color: 'var(--ink-soft)',
@@ -244,6 +242,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       <select
                         value={fonts.uiFont}
                         onChange={(e) => updateFont('uiFont', e.target.value)}
+                        className="mobile-friendly-select"
                         style={fontSelectStyle}
                       >
                         {FONT_OPTIONS.ui.map((opt) => (
@@ -253,18 +252,19 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         ))}
                       </select>
                       <div style={{ ...fontPreviewStyle, fontFamily: fonts.uiFont }}>
-                        Aa Bb Cc 123 — Interface
+                        Aa Bb Cc 123 — Interface Preview
                       </div>
                     </div>
 
                     {/* Reading & Title Font */}
                     <div style={fontCardStyle}>
                       <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ink)' }}>
-                        Reading & Title (Serif)
+                        Reading & Title Font
                       </span>
                       <select
                         value={fonts.serifFont}
                         onChange={(e) => updateFont('serifFont', e.target.value)}
+                        className="mobile-friendly-select"
                         style={fontSelectStyle}
                       >
                         {FONT_OPTIONS.serif.map((opt) => (
@@ -274,7 +274,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         ))}
                       </select>
                       <div style={{ ...fontPreviewStyle, fontFamily: fonts.serifFont }}>
-                        Notebook — Title Heading
+                        Notebook — Title Heading Preview
                       </div>
                     </div>
 
@@ -286,6 +286,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       <select
                         value={fonts.monoFont}
                         onChange={(e) => updateFont('monoFont', e.target.value)}
+                        className="mobile-friendly-select"
                         style={fontSelectStyle}
                       >
                         {FONT_OPTIONS.mono.map((opt) => (
@@ -295,7 +296,7 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                         ))}
                       </select>
                       <div style={{ ...fontPreviewStyle, fontFamily: fonts.monoFont }}>
-                        const x = 42; // code
+                        const note = &quot;Markdown&quot;;
                       </div>
                     </div>
                   </div>
@@ -307,9 +308,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
                     <div>
-                      <h3 style={sectionTitleStyle}>Custom Theme</h3>
+                      <h3 style={sectionTitleStyle}>Custom Theme Colors</h3>
                       <p style={sectionDescStyle}>
-                        Customize component colors in real-time using HEX values or color pickers.
+                        Customize colors using HEX values or color pickers.
                       </p>
                     </div>
                     {themeId === 'custom' && (
@@ -317,7 +318,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     )}
                   </div>
 
-                  {/* Color pickers grid */}
                   <div
                     className="color-pickers-grid"
                     style={{
@@ -352,7 +352,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                           </div>
 
                           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                            {/* Color picker box */}
                             <input
                               type="color"
                               value={currentColor}
@@ -367,7 +366,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                                 background: 'none',
                               }}
                             />
-                            {/* HEX text input */}
                             <input
                               type="text"
                               value={currentColor}
@@ -390,7 +388,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                     })}
                   </div>
 
-                  {/* Actions: Save Theme & Reset */}
                   <div className="custom-theme-actions" style={{ display: 'flex', gap: 10, marginTop: 18, justifyContent: 'flex-end' }}>
                     <button
                       onClick={resetCustomTheme}
@@ -439,8 +436,9 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             max-height: 85vh !important;
           }
 
-          .settings-nav-tabs button {
-            white-space: nowrap;
+          .mobile-friendly-select {
+            font-size: 15px !important;
+            padding: 8px 10px !important;
           }
 
           @media (max-width: 640px) {
@@ -470,14 +468,6 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             }
             .theme-presets-grid {
               grid-template-columns: repeat(auto-fill, minmax(105px, 1fr)) !important;
-            }
-            .custom-theme-actions {
-              flex-wrap: wrap !important;
-              justify-content: stretch !important;
-            }
-            .custom-theme-actions button {
-              flex: 1 1 auto !important;
-              text-align: center !important;
             }
           }
         `}</style>
@@ -544,8 +534,8 @@ const fontCardStyle: React.CSSProperties = {
 };
 
 const fontSelectStyle: React.CSSProperties = {
-  padding: '5px 8px',
-  fontSize: 12.5,
+  padding: '8px 10px',
+  fontSize: 14,
   borderRadius: 'var(--radius-sm)',
   border: '1px solid var(--border)',
   background: 'var(--bg-paper)',
@@ -556,9 +546,9 @@ const fontSelectStyle: React.CSSProperties = {
 };
 
 const fontPreviewStyle: React.CSSProperties = {
-  fontSize: 12.5,
+  fontSize: 13,
   color: 'var(--ink-soft)',
-  padding: '6px 8px',
+  padding: '8px 10px',
   background: 'var(--bg-paper)',
   borderRadius: 4,
   border: '1px border-dashed var(--border)',

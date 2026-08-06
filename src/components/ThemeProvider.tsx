@@ -138,28 +138,33 @@ export interface FontSettings {
 }
 
 export const DEFAULT_FONTS: FontSettings = {
-  uiFont: "'Inter', sans-serif",
+  uiFont: "'Poppins', sans-serif",
   serifFont: "'Source Serif 4', serif",
   monoFont: "'JetBrains Mono', monospace",
 };
 
 export const FONT_OPTIONS = {
   ui: [
-    { label: 'Inter (Default)', value: "'Inter', sans-serif" },
-    { label: 'Roboto', value: "'Roboto', sans-serif" },
-    { label: 'Outfit', value: "'Outfit', sans-serif" },
+    { label: 'Poppins (Professional Modern)', value: "'Poppins', sans-serif" },
+    { label: 'Plus Jakarta Sans', value: "'Plus Jakarta Sans', sans-serif" },
+    { label: 'Inter (Clean Tech)', value: "'Inter', sans-serif" },
+    { label: 'Roboto (Classic)', value: "'Roboto', sans-serif" },
+    { label: 'Outfit (Sleek Geometric)', value: "'Outfit', sans-serif" },
     { label: 'System UI', value: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
   ],
   serif: [
-    { label: 'Source Serif 4 (Default)', value: "'Source Serif 4', serif" },
+    { label: 'Source Serif 4 (Classic Serif)', value: "'Source Serif 4', serif" },
+    { label: 'Lora (Editorial Elegance)', value: "'Lora', serif" },
+    { label: 'Poppins (Modern Clean)', value: "'Poppins', sans-serif" },
     { label: 'Merriweather', value: "'Merriweather', serif" },
     { label: 'Playfair Display', value: "'Playfair Display', serif" },
     { label: 'Georgia', value: "Georgia, serif" },
   ],
   mono: [
-    { label: 'JetBrains Mono (Default)', value: "'JetBrains Mono', monospace" },
-    { label: 'Fira Code', value: "'Fira Code', monospace" },
-    { label: 'Courier Prime', value: "'Courier Prime', monospace" },
+    { label: 'JetBrains Mono (Default Code)', value: "'JetBrains Mono', monospace" },
+    { label: 'Fira Code (Developer)', value: "'Fira Code', monospace" },
+    { label: 'Space Mono (Modern Tech)', value: "'Space Mono', monospace" },
+    { label: 'Courier Prime (Typewriter)', value: "'Courier Prime', monospace" },
     { label: 'Consolas', value: "Consolas, monospace" },
   ],
 };
@@ -220,13 +225,13 @@ function applyFontsToDOM(fonts: FontSettings) {
   root.style.setProperty('--font', fonts.uiFont);
   root.style.setProperty('--serif-font', fonts.serifFont);
   root.style.setProperty('--mono-font', fonts.monoFont);
+  document.body.style.fontFamily = fonts.uiFont;
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const [themeId, setThemeId] = useState<ThemeId>('light');
   const [customColors, setCustomColors] = useState<ThemeColors>(THEME_PRESETS.light.colors);
   const [fonts, setFonts] = useState<FontSettings>(DEFAULT_FONTS);
-  const [isLoaded, setIsLoaded] = useState(false);
 
   useEffect(() => {
     try {
@@ -270,7 +275,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       applyColorsToDOM(targetColors, targetDark);
       applyFontsToDOM(loadedFonts);
     } catch {}
-    setIsLoaded(true);
   }, []);
 
   const getActiveColors = (id: ThemeId, custom: ThemeColors): ThemeColors => {
