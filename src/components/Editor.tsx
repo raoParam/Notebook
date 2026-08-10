@@ -76,6 +76,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   const [mobileTab, setMobileTab] = useState<MobileTab>('write');
   const [fullScreenMode, setFullScreenMode] = useState<FullScreenMode>('none');
   const [showDrawing, setShowDrawing] = useState(false);
+  const [editorFontSize, setEditorFontSize] = useState(14);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
@@ -334,6 +335,8 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         onToggleFullScreenPreview={toggleFullScreenPreview}
         onExitFullScreen={() => setFullScreenMode('none')}
         fullScreenMode={fullScreenMode}
+        currentFontSize={editorFontSize}
+        onFontSizeChange={setEditorFontSize}
       />
 
       {/* Drawing panel */}
@@ -467,12 +470,13 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
               border: 'none',
               outline: 'none',
               resize: 'none',
-              fontSize: 14,
+              fontSize: editorFontSize,
               lineHeight: 1.7,
               fontFamily: 'var(--mono-font)',
               color: 'var(--ink)',
               background: 'var(--bg-paper)',
               overflowY: 'auto',
+              transition: 'font-size 0.1s ease',
             }}
           />
         </div>
