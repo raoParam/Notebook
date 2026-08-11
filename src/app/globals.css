@@ -131,9 +131,15 @@ body, header, aside, main, section, nav {
 .prose-notebook h2 { font-size: 1.35em; }
 .prose-notebook h3 { font-size: 1.15em; }
 .prose-notebook p { margin-bottom: 1em; }
-.prose-notebook ul, .prose-notebook ol {
+.prose-notebook ul {
   margin-bottom: 1em;
   padding-left: 1.5em;
+  list-style-type: disc;
+}
+.prose-notebook ol {
+  margin-bottom: 1em;
+  padding-left: 1.5em;
+  list-style-type: decimal;
 }
 .prose-notebook li { margin-bottom: 0.25em; }
 .prose-notebook code {

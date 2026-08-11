@@ -13,8 +13,6 @@ export interface ToolbarProps {
   onToggleFullScreenPreview?: () => void;
   onExitFullScreen?: () => void;
   fullScreenMode?: 'none' | 'write' | 'preview';
-  currentFontSize?: number;
-  onFontSizeChange?: (size: number) => void;
 }
 
 const TOOLS = [
@@ -80,10 +78,6 @@ const TOOLS = [
   },
 ] as const;
 
-const FONT_SIZE_MIN = 10;
-const FONT_SIZE_MAX = 36;
-const FONT_SIZE_STEP = 2;
-
 export function Toolbar({
   onCommand,
   onImageUpload,
@@ -94,8 +88,6 @@ export function Toolbar({
   onToggleFullScreenPreview,
   onExitFullScreen,
   fullScreenMode = 'none',
-  currentFontSize = 14,
-  onFontSizeChange,
 }: ToolbarProps) {
   const imgRef = useRef<HTMLInputElement>(null);
   const mdRef = useRef<HTMLInputElement>(null);
@@ -218,81 +210,6 @@ export function Toolbar({
             </button>
           );
         })}
-
-        <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
-
-        {/* Font Size Controls */}
-        <div
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 2,
-            background: 'var(--bg-app)',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-sm)',
-            padding: '1px 3px',
-          }}
-          title="Font Size"
-        >
-          <button
-            id="font-size-decrease-btn"
-            onClick={() => onFontSizeChange?.(Math.max(FONT_SIZE_MIN, currentFontSize - FONT_SIZE_STEP))}
-            disabled={currentFontSize <= FONT_SIZE_MIN}
-            title={`Decrease font size (current: ${currentFontSize}px)`}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: currentFontSize <= FONT_SIZE_MIN ? 'not-allowed' : 'pointer',
-              padding: '2px 4px',
-              color: currentFontSize <= FONT_SIZE_MIN ? 'var(--ink-muted)' : 'var(--ink-soft)',
-              fontSize: 13,
-              fontWeight: 700,
-              display: 'inline-flex',
-              alignItems: 'center',
-              lineHeight: 1,
-              borderRadius: 3,
-              transition: 'color 0.12s',
-            }}
-          >
-            A<span style={{ fontSize: 9, verticalAlign: 'sub', lineHeight: 0 }}>−</span>
-          </button>
-          <span
-            id="font-size-display"
-            style={{
-              fontSize: 11,
-              fontWeight: 600,
-              color: 'var(--ink)',
-              minWidth: 22,
-              textAlign: 'center',
-              fontFamily: 'var(--mono-font)',
-              userSelect: 'none',
-            }}
-          >
-            {currentFontSize}
-          </span>
-          <button
-            id="font-size-increase-btn"
-            onClick={() => onFontSizeChange?.(Math.min(FONT_SIZE_MAX, currentFontSize + FONT_SIZE_STEP))}
-            disabled={currentFontSize >= FONT_SIZE_MAX}
-            title={`Increase font size (current: ${currentFontSize}px)`}
-            style={{
-              background: 'none',
-              border: 'none',
-              cursor: currentFontSize >= FONT_SIZE_MAX ? 'not-allowed' : 'pointer',
-              padding: '2px 4px',
-              color: currentFontSize >= FONT_SIZE_MAX ? 'var(--ink-muted)' : 'var(--ink-soft)',
-              fontSize: 14,
-              fontWeight: 700,
-              display: 'inline-flex',
-              alignItems: 'center',
-              lineHeight: 1,
-              borderRadius: 3,
-              transition: 'color 0.12s',
-            }}
-          >
-            A<span style={{ fontSize: 11, verticalAlign: 'super', lineHeight: 0 }}>+</span>
-          </button>
-        </div>
 
         <div style={{ width: 1, height: 16, background: 'var(--border)', margin: '0 4px' }} />
 
@@ -557,25 +474,6 @@ export function Toolbar({
                   <path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/>
                 </svg>
                 <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>DRAW</span>
-              </button>
-              {/* Font size in mobile modal */}
-              <button
-                onClick={() => { onFontSizeChange?.(Math.max(FONT_SIZE_MIN, currentFontSize - FONT_SIZE_STEP)); }}
-                style={mobileGridToolStyle}
-                title={`Decrease font size (current: ${currentFontSize}px)`}
-                disabled={currentFontSize <= FONT_SIZE_MIN}
-              >
-                <span style={{ fontSize: 14, fontWeight: 700 }}>A<span style={{ fontSize: 9, verticalAlign: 'sub' }}>−</span></span>
-                <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>SMALLER</span>
-              </button>
-              <button
-                onClick={() => { onFontSizeChange?.(Math.min(FONT_SIZE_MAX, currentFontSize + FONT_SIZE_STEP)); }}
-                style={mobileGridToolStyle}
-                title={`Increase font size (current: ${currentFontSize}px)`}
-                disabled={currentFontSize >= FONT_SIZE_MAX}
-              >
-                <span style={{ fontSize: 14, fontWeight: 700 }}>A<span style={{ fontSize: 11, verticalAlign: 'super' }}>+</span></span>
-                <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>LARGER</span>
               </button>
             </div>
           </div>
