@@ -32,7 +32,7 @@ export function SyncButton({ syncStatus, connectedCount, onSync }: SyncButtonPro
     <div style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
       <button
         id="sync-button"
-        onClick={isIdle || isError ? onSync : undefined}
+        onClick={onSync}
         disabled={isBusy}
         title={
           syncStatus.stage === 'error'

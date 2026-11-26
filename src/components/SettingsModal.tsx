@@ -12,9 +12,11 @@ import {
 
 interface SettingsModalProps {
   onClose: () => void;
+  autoSyncEnabled?: boolean;
+  onToggleAutoSync?: (enabled: boolean) => void;
 }
 
-type SettingsTab = 'appearance';
+type SettingsTab = 'appearance' | 'sync';
 type ImportMode = 'file' | 'text';
 
 const COLOR_FIELDS: { key: keyof ThemeColors; label: string; cssVar: string }[] = [
@@ -32,8 +34,12 @@ const COLOR_FIELDS: { key: keyof ThemeColors; label: string; cssVar: string }[] 
   { key: 'danger', label: 'Danger Color', cssVar: '--danger' },
 ];
 
-export function SettingsModal({ onClose }: SettingsModalProps) {
-  const [activeTab] = useState<SettingsTab>('appearance');
+export function SettingsModal({
+  onClose,
+  autoSyncEnabled = false,
+  onToggleAutoSync,
+}: SettingsModalProps) {
+  const [activeTab, setActiveTab] = useState<SettingsTab>('appearance');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [showImportDialog, setShowImportDialog] = useState(false);
@@ -277,18 +283,37 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             }}
           >
             <button
+              type="button"
+              onClick={() => setActiveTab('appearance')}
               style={{
                 ...navTabStyle,
-                background: 'var(--bg-paper)',
-                color: 'var(--accent)',
-                fontWeight: 600,
-                boxShadow: 'var(--shadow-sm)',
+                background: activeTab === 'appearance' ? 'var(--bg-paper)' : 'transparent',
+                color: activeTab === 'appearance' ? 'var(--accent)' : 'var(--ink-soft)',
+                fontWeight: activeTab === 'appearance' ? 600 : 500,
+                boxShadow: activeTab === 'appearance' ? 'var(--shadow-sm)' : 'none',
               }}
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 1 0 10 10"/>
               </svg>
               Appearance
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('sync')}
+              style={{
+                ...navTabStyle,
+                background: activeTab === 'sync' ? 'var(--bg-paper)' : 'transparent',
+                color: activeTab === 'sync' ? 'var(--accent)' : 'var(--ink-soft)',
+                fontWeight: activeTab === 'sync' ? 600 : 500,
+                boxShadow: activeTab === 'sync' ? 'var(--shadow-sm)' : 'none',
+              }}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/>
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+              </svg>
+              Sync
             </button>
           </div>
 
@@ -794,6 +819,82 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
                       Save Theme
                     </button>
                   </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'sync' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                <div>
+                  <h3 style={sectionTitleStyle}>Automatic Synchronization</h3>
+                  <p style={sectionDescStyle}>
+                    Control whether this device automatically synchronizes notes with paired devices.
+                  </p>
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: 16,
+                    padding: '14px 16px',
+                    background: 'var(--bg-app)',
+                    borderRadius: 'var(--radius-sm)',
+                    border: '1px solid var(--border)',
+                  }}
+                >
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--ink)' }}>
+                      Auto-sync
+                    </div>
+                    <p style={{ fontSize: 12, color: 'var(--ink-muted)', marginTop: 3, lineHeight: 1.5 }}>
+                      Off by default. Automatic sync runs only when <strong>both</strong> this device
+                      and a connected paired device have Auto-sync enabled. Manual sync remains
+                      available at any time.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={autoSyncEnabled}
+                    aria-label="Toggle Auto-sync"
+                    onClick={() => {
+                      const next = !autoSyncEnabled;
+                      onToggleAutoSync?.(next);
+                      setNotification({
+                        type: 'success',
+                        message: next
+                          ? 'Auto-sync enabled for this device.'
+                          : 'Auto-sync disabled for this device.',
+                      });
+                    }}
+                    style={{
+                      width: 46,
+                      height: 26,
+                      borderRadius: 999,
+                      border: '1px solid var(--border)',
+                      background: autoSyncEnabled ? 'var(--accent)' : 'var(--bg-sidebar)',
+                      position: 'relative',
+                      cursor: 'pointer',
+                      flexShrink: 0,
+                      transition: 'background 0.15s ease',
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: 'absolute',
+                        top: 2,
+                        left: autoSyncEnabled ? 22 : 2,
+                        width: 20,
+                        height: 20,
+                        borderRadius: '50%',
+                        background: '#ffffff',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                        transition: 'left 0.15s ease',
+                      }}
+                    />
+                  </button>
                 </div>
               </div>
             )}

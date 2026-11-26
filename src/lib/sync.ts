@@ -34,6 +34,15 @@ export type SyncMessage =
       sessionId?: string;
       wantsManifest?: boolean;
       inReplyTo?: string;
+      previewOnly?: boolean;
+    }
+  | {
+      type: 'manifest-request';
+      sessionId: string;
+    }
+  | {
+      type: 'auto-sync-pref';
+      enabled: boolean;
     }
   | { type: 'request'; noteIds: string[]; sessionId?: string }
   | {
@@ -213,16 +222,28 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
       if (data.inReplyTo !== undefined && !isValidNoteId(data.inReplyTo)) {
         return null;
       }
+      if (data.previewOnly !== undefined && typeof data.previewOnly !== 'boolean') {
+        return null;
+      }
       const entries: ManifestEntry[] = [];
       for (const item of data.entries) {
         if (!isPlainObject(item)) return null;
         if (!isValidNoteId(item.noteId)) return null;
         if (!isValidHash(item.contentHash, false)) return null;
         if (!isValidTimestamp(item.updatedAt)) return null;
+        if (
+          item.title !== undefined &&
+          (typeof item.title !== 'string' ||
+            item.title.length > MAX_NOTE_TITLE_LENGTH ||
+            hasControlChars(item.title))
+        ) {
+          return null;
+        }
         entries.push({
           noteId: item.noteId,
           contentHash: item.contentHash,
           updatedAt: item.updatedAt,
+          ...(item.title !== undefined ? { title: item.title } : {}),
         });
       }
       return {
@@ -231,6 +252,27 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         ...(data.sessionId !== undefined ? { sessionId: data.sessionId } : {}),
         ...(data.wantsManifest !== undefined ? { wantsManifest: data.wantsManifest } : {}),
         ...(data.inReplyTo !== undefined ? { inReplyTo: data.inReplyTo } : {}),
+        ...(data.previewOnly !== undefined ? { previewOnly: data.previewOnly } : {}),
+      };
+    }
+
+    case 'manifest-request': {
+      if (!isValidNoteId(data.sessionId)) {
+        return null;
+      }
+      return {
+        type: 'manifest-request',
+        sessionId: data.sessionId,
+      };
+    }
+
+    case 'auto-sync-pref': {
+      if (typeof data.enabled !== 'boolean') {
+        return null;
+      }
+      return {
+        type: 'auto-sync-pref',
+        enabled: data.enabled,
       };
     }
 
@@ -360,6 +402,63 @@ export interface ManifestEntry {
   noteId: string;
   contentHash: string;
   updatedAt: string;
+  title?: string;
+}
+
+export type PeerNoteRelation = 'new' | 'updated' | 'identical' | 'local-newer' | 'conflict';
+
+export interface PeerNotePreview {
+  noteId: string;
+  title: string;
+  updatedAt: string;
+  contentHash: string;
+  relation: PeerNoteRelation;
+}
+
+/**
+ * Classify notes from a peer manifest relative to the local manifest for manual/selective sync UI.
+ */
+export function classifyPeerNotes(
+  localManifest: ManifestEntry[],
+  peerManifest: ManifestEntry[]
+): PeerNotePreview[] {
+  const localMap = new Map(localManifest.map((e) => [e.noteId, e]));
+  return peerManifest.map((peer) => {
+    const local = localMap.get(peer.noteId);
+    let relation: PeerNoteRelation;
+    if (!local) {
+      relation = 'new';
+    } else if (local.contentHash === peer.contentHash) {
+      relation = 'identical';
+    } else {
+      const localTime = new Date(local.updatedAt).getTime();
+      const peerTime = new Date(peer.updatedAt).getTime();
+      if (peerTime > localTime) {
+        relation = 'updated';
+      } else if (peerTime < localTime) {
+        relation = 'local-newer';
+      } else {
+        relation = 'conflict';
+      }
+    }
+    return {
+      noteId: peer.noteId,
+      title: peer.title?.trim() || 'Untitled',
+      updatedAt: peer.updatedAt,
+      contentHash: peer.contentHash,
+      relation,
+    };
+  });
+}
+
+/**
+ * Compute a deterministic digest string of a manifest for change-detection in auto-sync.
+ */
+export function computeManifestDigest(manifest: ManifestEntry[]): string {
+  return [...manifest]
+    .sort((a, b) => a.noteId.localeCompare(b.noteId))
+    .map((e) => `${e.noteId}:${e.contentHash}`)
+    .join('|');
 }
 
 /** Diff result describing what to request from the peer */
@@ -535,9 +634,13 @@ export async function decompressNote(data: Uint8Array): Promise<Note> {
 /** Build the local manifest from the DB */
 export async function buildLocalManifest(db: import('./db').NotebookDB): Promise<ManifestEntry[]> {
   const notes = await db.notes.toArray();
-  return notes.map((n) => ({
-    noteId: n.id,
-    contentHash: n.contentHash,
-    updatedAt: n.updatedAt,
-  }));
+  return notes.map((n) => {
+    const sanitizedTitle = n.title.replace(/[\u0000-\u001f\u007f]/g, ' ').slice(0, MAX_NOTE_TITLE_LENGTH);
+    return {
+      noteId: n.id,
+      contentHash: n.contentHash,
+      updatedAt: n.updatedAt,
+      title: sanitizedTitle,
+    };
+  });
 }

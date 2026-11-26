@@ -8,6 +8,7 @@ import { Sidebar } from '@/components/Sidebar';
 import { Editor } from '@/components/Editor';
 import { PairDevice } from '@/components/PairDevice';
 import { SyncButton } from '@/components/SyncButton';
+import { SyncDialog } from '@/components/SyncDialog';
 import { SettingsModal } from '@/components/SettingsModal';
 import type { Note } from '@/lib/db';
 import { renderSafeMarkdown, resolveSafeAttachments } from '@/lib/markdown';
@@ -32,21 +33,31 @@ export default function NotebookPage() {
     pairings,
     connectedPeers,
     syncStatus,
+    autoSyncEnabled,
+    setAutoSyncEnabled,
+    peerAutoSync,
+    notifyLocalNoteChange,
+    manualPreview,
+    requestPeerManifest,
+    syncAllWithPeer,
+    syncSelectedWithPeer,
+    denyManualSync,
     addPairing,
     removePairing,
-    triggerSync,
   } = useSync(reload);
 
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showPairDevice, setShowPairDevice] = useState(false);
+  const [showSyncDialog, setShowSyncDialog] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
   const connectedCount = connectedPeers.length;
 
   const handleAddNote = useCallback(async () => {
     await addNote();
+    notifyLocalNoteChange();
     setSidebarOpen(false);
-  }, [addNote]);
+  }, [addNote, notifyLocalNoteChange]);
 
   const handleDeleteNote = useCallback(
     async (id: string) => {
@@ -73,9 +84,20 @@ export default function NotebookPage() {
     ) => {
       const id = targetNoteId ?? activeId;
       if (!id) return;
-      updateNote(id, patch);
+      void updateNote(id, patch).then(() => {
+        notifyLocalNoteChange();
+      });
     },
-    [activeId, updateNote]
+    [activeId, updateNote, notifyLocalNoteChange]
+  );
+
+  const handleImportNote = useCallback(
+    async (title: string, content: string) => {
+      const id = await importNote(title, content);
+      notifyLocalNoteChange();
+      return id;
+    },
+    [importNote, notifyLocalNoteChange]
   );
 
   const handleExportPdf = useCallback(async () => {
@@ -229,7 +251,7 @@ export default function NotebookPage() {
           <SyncButton
             syncStatus={syncStatus}
             connectedCount={connectedCount}
-            onSync={triggerSync}
+            onSync={() => setShowSyncDialog(true)}
           />
 
           {/* Settings button (replaces Theme button) */}
@@ -299,7 +321,7 @@ export default function NotebookPage() {
             <Editor
               note={activeNote}
               onUpdate={handleUpdateNote}
-              onImportNote={importNote}
+              onImportNote={handleImportNote}
               onExportPdf={handleExportPdf}
               onExportMd={handleExportMd}
             />
@@ -320,9 +342,38 @@ export default function NotebookPage() {
         />
       )}
 
+      {/* Manual Sync Dialogue */}
+      {showSyncDialog && (
+        <SyncDialog
+          pairings={pairings}
+          connectedPeers={connectedPeers}
+          manualPreview={manualPreview}
+          syncStatus={syncStatus}
+          autoSyncEnabled={autoSyncEnabled}
+          peerAutoSync={peerAutoSync}
+          onSelectPairing={requestPeerManifest}
+          onRefreshManifest={requestPeerManifest}
+          onSyncAll={syncAllWithPeer}
+          onSyncSelected={syncSelectedWithPeer}
+          onDeny={() => {
+            denyManualSync();
+            setShowSyncDialog(false);
+          }}
+          onOpenPairDevice={() => {
+            denyManualSync();
+            setShowSyncDialog(false);
+            setShowPairDevice(true);
+          }}
+        />
+      )}
+
       {/* Settings Modal */}
       {showSettings && (
-        <SettingsModal onClose={() => setShowSettings(false)} />
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          autoSyncEnabled={autoSyncEnabled}
+          onToggleAutoSync={setAutoSyncEnabled}
+        />
       )}
 
       {/* Responsive styles */}

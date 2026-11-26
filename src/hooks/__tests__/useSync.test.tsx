@@ -5,6 +5,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Note, Pairing } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
+import { compressNote } from '@/lib/sync';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -251,7 +252,7 @@ vi.mock('@/lib/turn', () => ({
   getIceServers: () => mockIceServersImpl(),
 }));
 
-import { SYNC_TIMEOUT_MS, useSync } from '@/hooks/useSync';
+import { AUTO_SYNC_DEBOUNCE_MS, SYNC_TIMEOUT_MS, useSync } from '@/hooks/useSync';
 
 type HookApi = ReturnType<typeof useSync>;
 
@@ -336,6 +337,12 @@ async function mountSyncHook(deviceId: string, deviceDb: MockDeviceDb): Promise<
       addPairing: wrapAction(latestApi.addPairing),
       removePairing: wrapAction(latestApi.removePairing),
       triggerSync: wrapAction(latestApi.triggerSync),
+      setAutoSyncEnabled: wrapAction(latestApi.setAutoSyncEnabled),
+      notifyLocalNoteChange: wrapAction(latestApi.notifyLocalNoteChange),
+      requestPeerManifest: wrapAction(latestApi.requestPeerManifest),
+      syncAllWithPeer: wrapAction(latestApi.syncAllWithPeer),
+      syncSelectedWithPeer: wrapAction(latestApi.syncSelectedWithPeer),
+      denyManualSync: wrapAction(latestApi.denyManualSync),
     }),
     onNotesChanged,
     unmount: async () => {
@@ -382,6 +389,7 @@ describe('useSync reliable protocol & room lifecycle', () => {
   const cleanups: Array<() => Promise<void>> = [];
 
   beforeEach(() => {
+    window.localStorage.clear();
     resetNetwork();
     mockIceServersImpl = async () => [{ urls: 'stun:stun.l.google.com:19302' }];
     fallbackDb = createMockDb();
@@ -923,5 +931,367 @@ describe('useSync reliable protocol & room lifecycle', () => {
     });
 
     expect(mountA.api().syncStatus.stage).toBe('error');
+  });
+});
+
+describe('useSync Batch 3: auto-sync, manual preview & selective sync', () => {
+  const cleanups: Array<() => Promise<void>> = [];
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetNetwork();
+    mockIceServersImpl = async () => [{ urls: 'stun:stun.l.google.com:19302' }];
+    fallbackDb = createMockDb();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    while (cleanups.length > 0) {
+      const fn = cleanups.pop();
+      if (fn) await fn();
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('defaults Auto-sync to OFF and persists local preference in localStorage', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const dbA = createMockDb([], [pairing]);
+    const mountA = await mountSyncHook('device-A', dbA);
+    cleanups.push(mountA.unmount);
+
+    expect(mountA.api().autoSyncEnabled).toBe(false);
+    expect(window.localStorage.getItem('nb-auto-sync')).toBeNull();
+
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+    });
+    expect(mountA.api().autoSyncEnabled).toBe(true);
+    expect(window.localStorage.getItem('nb-auto-sync')).toBe('true');
+
+    // Remounting reads localStorage preference
+    await mountA.unmount();
+    cleanups.pop();
+    const mountA2 = await mountSyncHook('device-A', dbA);
+    cleanups.push(mountA2.unmount);
+    expect(mountA2.api().autoSyncEnabled).toBe(true);
+  });
+
+  it('runs auto-sync only when BOTH devices enable it, propagates local edits, and stops when either disables', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA = await makeNote('a1', 'Note A', 'Body A', '2026-01-02T00:00:00.000Z');
+    const noteB = await makeNote('b1', 'Note B', 'Body B', '2026-01-02T00:00:00.000Z');
+
+    const dbA = createMockDb([noteA], [pairing]);
+    const dbB = createMockDb([noteB], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    // Only Device A enables Auto-sync -> must NOT sync yet
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncTicks();
+
+    expect(dbA.notesMap.has('b1')).toBe(false);
+    expect(dbB.notesMap.has('a1')).toBe(false);
+    expect(mountB.api().peerAutoSync[`${pairing.id}\x00device-A`]).toBe(true);
+    expect(mountA.api().peerAutoSync[`${pairing.id}\x00device-B`]).toBeFalsy();
+
+    // Device B also enables Auto-sync -> mutually enabled, syncs union without duplicates
+    await act(async () => {
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncTicks(20);
+
+    expect(dbA.notesMap.has('b1')).toBe(true);
+    expect(dbB.notesMap.has('a1')).toBe(true);
+
+    const noteMsgsBeforeEdit = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+
+    // Local note edit on A -> debounced auto-sync sends only the new note, no infinite loop
+    const noteA2 = await makeNote('a2', 'Note A2', 'Edited locally', '2026-01-03T00:00:00.000Z');
+    dbA.notesMap.set('a2', noteA2);
+
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await new Promise((r) => setTimeout(r, AUTO_SYNC_DEBOUNCE_MS + 80));
+    await flushAsyncTicks(20);
+
+    expect(dbB.notesMap.has('a2')).toBe(true);
+    const noteMsgsAfterEdit = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+    expect(noteMsgsAfterEdit - noteMsgsBeforeEdit).toBe(1);
+
+    // Settling further must not cause any extra loop transfers
+    await flushAsyncTicks(15);
+    const noteMsgsSettled = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+    expect(noteMsgsSettled).toBe(noteMsgsAfterEdit);
+
+    // Device B disables Auto-sync -> further local edits on A must NOT auto-sync
+    await act(async () => {
+      mountB.api().setAutoSyncEnabled(false);
+    });
+    await flushAsyncTicks();
+
+    const noteA3 = await makeNote('a3', 'Note A3', 'After disable', '2026-01-04T00:00:00.000Z');
+    dbA.notesMap.set('a3', noteA3);
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await new Promise((r) => setTimeout(r, AUTO_SYNC_DEBOUNCE_MS + 80));
+    await flushAsyncTicks(15);
+
+    expect(dbB.notesMap.has('a3')).toBe(false);
+  });
+
+  it('triggers auto-sync on peer reconnection and isolates multiple paired devices', async () => {
+    const pairingAB: Pairing = { id: 'roomAB123456', label: 'Device B', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const pairingAC: Pairing = { id: 'roomAC123456', label: 'Device C', pairedAt: '2026-01-01T00:00:00.000Z' };
+
+    const noteA = await makeNote('a1', 'From A', 'Content A', '2026-01-02T00:00:00.000Z');
+    const noteB = await makeNote('b1', 'From B', 'Content B', '2026-01-02T00:00:00.000Z');
+    const noteC = await makeNote('c1', 'From C', 'Content C', '2026-01-02T00:00:00.000Z');
+
+    const dbA = createMockDb([noteA], [pairingAB, pairingAC]);
+    const dbB = createMockDb([noteB], [pairingAB]);
+    const dbC = createMockDb([noteC], [pairingAC]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    const mountC = await mountSyncHook('device-C', dbC);
+    cleanups.push(mountA.unmount, mountB.unmount, mountC.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB, 'device-C': dbC });
+
+    // A and B enable auto-sync; C stays OFF
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncTicks(20);
+
+    // B synced with A, C did not
+    expect(dbA.notesMap.has('b1')).toBe(true);
+    expect(dbB.notesMap.has('a1')).toBe(true);
+    expect(dbA.notesMap.has('c1')).toBe(false);
+    expect(dbC.notesMap.has('a1')).toBe(false);
+
+    // Simulate B going offline, creating note b2, then reconnecting
+    const roomAForB = network.rooms.find((r) => r.deviceId === 'device-A' && r.roomId === pairingAB.id)!;
+    const roomB = network.rooms.find((r) => r.deviceId === 'device-B' && r.roomId === pairingAB.id)!;
+
+    await act(async () => {
+      roomAForB.onPeerLeave?.('device-B');
+      roomB.onPeerLeave?.('device-A');
+    });
+
+    const noteB2 = await makeNote('b2', 'Offline B Note', 'Created offline', '2026-01-05T00:00:00.000Z');
+    dbB.notesMap.set('b2', noteB2);
+
+    await act(async () => {
+      roomAForB.onPeerJoin?.('device-B');
+      roomB.onPeerJoin?.('device-A');
+    });
+    await flushAsyncTicks(20);
+
+    expect(dbA.notesMap.has('b2')).toBe(true);
+    expect(dbC.notesMap.has('b2')).toBe(false);
+  });
+
+  it('manual sync requests fresh preview without transferring notes and respects Deny sync', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Laptop', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const localIdentical = await makeNote('same', 'Same Note', 'Identical body', '2026-01-02T00:00:00.000Z');
+    const localOlder = await makeNote('upd', 'Old Local', 'Old body', '2026-01-01T00:00:00.000Z');
+    const localNewer = await makeNote('loc', 'Newer Local', 'Keep local', '2026-01-10T00:00:00.000Z');
+
+    const peerIdentical = { ...localIdentical };
+    const peerNewer = await makeNote('upd', 'Updated Peer', 'Updated body', '2026-01-05T00:00:00.000Z');
+    const peerOlder = await makeNote('loc', 'Older Peer', 'Stale peer body', '2026-01-01T00:00:00.000Z');
+    const peerNew = await makeNote('pnew', 'Brand New Peer', 'New body', '2026-01-06T00:00:00.000Z');
+
+    const dbA = createMockDb([localIdentical, localOlder, localNewer], [pairing]);
+    const dbB = createMockDb([peerIdentical, peerNewer, peerOlder, peerNew], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    await act(async () => {
+      void mountA.api().requestPeerManifest(pairing.id);
+    });
+    await flushAsyncTicks(15);
+
+    const preview = mountA.api().manualPreview;
+    expect(preview.stage).toBe('ready');
+    if (preview.stage === 'ready') {
+      const relations = new Map(preview.notes.map((e) => [e.noteId, e.relation]));
+      expect(relations.get('pnew')).toBe('new');
+      expect(relations.get('upd')).toBe('updated');
+      expect(relations.get('same')).toBe('identical');
+      expect(relations.get('loc')).toBe('local-newer');
+    }
+
+    // No note payloads should have been transferred during manifest preview
+    expect(dbA.notesMap.has('pnew')).toBe(false);
+    expect(network.sentMessages.some((m) => (m.data as { type?: string }).type === 'note')).toBe(false);
+
+    // Deny closes preview without transferring anything
+    await act(async () => {
+      mountA.api().denyManualSync();
+    });
+    expect(mountA.api().manualPreview.stage).toBe('idle');
+    expect(dbA.notesMap.has('pnew')).toBe(false);
+    expect(dbB.notesMap.get('loc')?.content).toBe('Stale peer body');
+  });
+
+  it('syncSelectedWithPeer transfers only selected notes, rejects unselected pushes, and preserves LWW', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Laptop', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const localNewer = await makeNote('loc', 'Local Newer', 'Keep local', '2026-01-10T00:00:00.000Z');
+    const localOnly = await makeNote('only-local', 'Only Local', 'Local only body', '2026-01-03T00:00:00.000Z');
+
+    const peerOlder = await makeNote('loc', 'Peer Stale', 'Should not overwrite', '2026-01-01T00:00:00.000Z');
+    const peerWanted = await makeNote('wanted', 'Wanted Peer', 'Wanted content', '2026-01-05T00:00:00.000Z');
+    const peerSkipped = await makeNote('skipped', 'Skipped Peer', 'Skipped content', '2026-01-05T00:00:00.000Z');
+
+    const dbA = createMockDb([localNewer, localOnly], [pairing]);
+    const dbB = createMockDb([peerOlder, peerWanted, peerSkipped], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    // Empty selection is a no-op and transfers nothing
+    const sentBeforeEmpty = network.sentMessages.length;
+    await act(async () => {
+      await mountA.api().syncSelectedWithPeer(pairing.id, []);
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.has('wanted')).toBe(false);
+    expect(network.sentMessages.length).toBe(sentBeforeEmpty);
+    expect(mountA.api().syncStatus).toEqual({ stage: 'idle' });
+
+    // Request preview first
+    await act(async () => {
+      void mountA.api().requestPeerManifest(pairing.id);
+    });
+    await flushAsyncTicks(15);
+
+    const reqMessagesBefore = network.sentMessages.length;
+    const previewReady = mountA.api().manualPreview;
+    expect(previewReady.stage).toBe('ready');
+
+    // Hold note messages briefly to verify mid-session unsolicited push rejection
+    const heldWantedNotes: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'note') {
+        const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+        heldWantedNotes.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    await act(async () => {
+      void mountA.api().syncSelectedWithPeer(pairing.id, ['wanted', 'loc']);
+    });
+    await flushAsyncTicks(15);
+
+    // Verify request only contained transferable selected ID ('wanted', skipping local-newer 'loc')
+    const reqMsg = network.sentMessages
+      .slice(reqMessagesBefore)
+      .find((m) => (m.data as { type?: string }).type === 'request')
+      ?.data as { noteIds: string[]; sessionId: string } | undefined;
+    expect(reqMsg?.noteIds).toEqual(['wanted']);
+
+    // While selective session is active, inject unsolicited note ('unsolicited') -> must be rejected
+    const dbCNote = await makeNote('unsolicited', 'Malicious Push', 'Sneaky', '2026-01-09T00:00:00.000Z');
+    const compressed = await compressNote(dbCNote);
+    const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA.onMessage?.(
+          {
+            type: 'note',
+            sessionId: reqMsg!.sessionId,
+            transferId: 'unsolicited-xfer',
+            payload: Array.from(compressed),
+          },
+          { peerId: 'device-B' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.has('unsolicited')).toBe(false);
+
+    // Deliver the legitimate 'wanted' note and finish
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      for (const deliver of heldWantedNotes) deliver();
+    });
+    await flushAsyncTicks(20);
+
+    // Only 'wanted' is pulled; 'skipped' was not selected; 'loc' LWW preserved local newer
+    expect(dbA.notesMap.get('wanted')?.content).toBe('Wanted content');
+    expect(dbA.notesMap.has('skipped')).toBe(false);
+    expect(dbA.notesMap.get('loc')?.content).toBe('Keep local');
+
+    // Device B did NOT proactively pull 'only-local' during selective pull
+    expect(dbB.notesMap.has('only-local')).toBe(false);
+  });
+
+  it('syncAllWithPeer transfers full union and preview transitions to disconnected when peer leaves', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Laptop', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA = await makeNote('a1', 'Note A', 'Body A', '2026-01-02T00:00:00.000Z');
+    const noteB = await makeNote('b1', 'Note B', 'Body B', '2026-01-03T00:00:00.000Z');
+
+    const dbA = createMockDb([noteA], [pairing]);
+    const dbB = createMockDb([noteB], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    await act(async () => {
+      void mountA.api().requestPeerManifest(pairing.id);
+    });
+    await flushAsyncTicks(15);
+    expect(mountA.api().manualPreview.stage).toBe('ready');
+
+    // Sync all transfers union
+    await act(async () => {
+      void mountA.api().syncAllWithPeer(pairing.id);
+    });
+    await flushAsyncTicks(20);
+    expect(dbA.notesMap.has('b1')).toBe(true);
+    expect(dbB.notesMap.has('a1')).toBe(true);
+
+    // Open preview again, then peer disconnects -> stage becomes disconnected
+    await act(async () => {
+      void mountA.api().requestPeerManifest(pairing.id);
+    });
+    await flushAsyncTicks(15);
+    const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+    await act(async () => {
+      roomA.onPeerLeave?.('device-B');
+    });
+    expect(mountA.api().manualPreview.stage).toBe('disconnected');
   });
 });

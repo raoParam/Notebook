@@ -8,7 +8,9 @@ import {
   MAX_NOTE_CONTENT_LENGTH,
   MAX_NOTE_TITLE_LENGTH,
   MAX_REQUEST_NOTE_IDS,
+  classifyPeerNotes,
   compressNote,
+  computeManifestDigest,
   countUnchangedNotes,
   decompressNote,
   isSafeAttachmentDataUrl,
@@ -574,5 +576,137 @@ describe('validateNote and isSafeAttachmentDataUrl', () => {
     ]) {
       expect(isSafeAttachmentDataUrl(goodUrl)).toBe(true);
     }
+  });
+
+  it('validates manifest-request, auto-sync-pref, manifest title, and previewOnly fields in parseSyncMessage', () => {
+    expect(
+      parseSyncMessage({ type: 'manifest-request', sessionId: 'req-1' })
+    ).toEqual({ type: 'manifest-request', sessionId: 'req-1' });
+    expect(parseSyncMessage({ type: 'manifest-request' })).toBeNull();
+    expect(parseSyncMessage({ type: 'manifest-request', sessionId: '' })).toBeNull();
+    expect(parseSyncMessage({ type: 'manifest-request', sessionId: 'bad\nid' })).toBeNull();
+
+    expect(parseSyncMessage({ type: 'auto-sync-pref', enabled: true })).toEqual({
+      type: 'auto-sync-pref',
+      enabled: true,
+    });
+    expect(parseSyncMessage({ type: 'auto-sync-pref', enabled: false })).toEqual({
+      type: 'auto-sync-pref',
+      enabled: false,
+    });
+    expect(parseSyncMessage({ type: 'auto-sync-pref', enabled: 'true' })).toBeNull();
+    expect(parseSyncMessage({ type: 'auto-sync-pref' })).toBeNull();
+
+    expect(
+      parseSyncMessage({
+        type: 'manifest',
+        sessionId: 'm1',
+        previewOnly: true,
+        entries: [
+          {
+            noteId: 'n1',
+            title: 'Note One',
+            contentHash: 'abc123',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    ).toEqual({
+      type: 'manifest',
+      sessionId: 'm1',
+      previewOnly: true,
+      entries: [
+        {
+          noteId: 'n1',
+          title: 'Note One',
+          contentHash: 'abc123',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+    });
+
+    // Reject non-boolean previewOnly or invalid title (non-string, oversized, control chars)
+    expect(
+      parseSyncMessage({
+        type: 'manifest',
+        entries: [],
+        previewOnly: 'yes',
+      })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'manifest',
+        entries: [
+          {
+            noteId: 'n1',
+            title: 123,
+            contentHash: 'abc',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'manifest',
+        entries: [
+          {
+            noteId: 'n1',
+            title: 'A'.repeat(MAX_NOTE_TITLE_LENGTH + 1),
+            contentHash: 'abc',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'manifest',
+        entries: [
+          {
+            noteId: 'n1',
+            title: 'Bad\u0000Title',
+            contentHash: 'abc',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+      })
+    ).toBeNull();
+  });
+
+  it('classifies peer note relations and computes order-independent manifest digests', () => {
+    const local = [
+      { noteId: 'n-identical', title: 'Same', contentHash: 'h1', updatedAt: '2026-01-02T00:00:00.000Z' },
+      { noteId: 'n-updated', title: 'Old', contentHash: 'h2-old', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'n-local-newer', title: 'Local', contentHash: 'h3-new', updatedAt: '2026-01-05T00:00:00.000Z' },
+      { noteId: 'n-conflict', title: 'Conflict', contentHash: 'h4-local', updatedAt: '2026-01-03T00:00:00.000Z' },
+    ];
+    const peer = [
+      { noteId: 'n-identical', title: 'Same', contentHash: 'h1', updatedAt: '2026-01-02T00:00:00.000Z' },
+      { noteId: 'n-updated', title: 'Updated Note', contentHash: 'h2-new', updatedAt: '2026-01-04T00:00:00.000Z' },
+      { noteId: 'n-local-newer', contentHash: 'h3-old', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'n-conflict', title: 'Conflict', contentHash: 'h4-peer', updatedAt: '2026-01-03T00:00:00.000Z' },
+      { noteId: 'n-new', title: 'Brand New', contentHash: 'h5', updatedAt: '2026-01-06T00:00:00.000Z' },
+    ];
+
+    const previews = classifyPeerNotes(local, peer);
+    const byId = new Map(previews.map((p) => [p.noteId, p]));
+
+    expect(byId.get('n-new')?.relation).toBe('new');
+    expect(byId.get('n-updated')?.relation).toBe('updated');
+    expect(byId.get('n-identical')?.relation).toBe('identical');
+    expect(byId.get('n-local-newer')?.relation).toBe('local-newer');
+    expect(byId.get('n-conflict')?.relation).toBe('conflict');
+    expect(byId.get('n-local-newer')?.title).toBe('Untitled');
+    expect(byId.get('n-updated')?.title).toBe('Updated Note');
+
+    const digestForward = computeManifestDigest(peer);
+    const digestReversed = computeManifestDigest([...peer].reverse());
+    expect(digestForward).toBe(digestReversed);
+
+    const changedPeer = peer.map((e) =>
+      e.noteId === 'n-new' ? { ...e, contentHash: 'h5-edited' } : e
+    );
+    expect(computeManifestDigest(changedPeer)).not.toBe(digestForward);
   });
 });
