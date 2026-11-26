@@ -9,6 +9,7 @@ import {
   MAX_NOTE_TITLE_LENGTH,
   MAX_REQUEST_NOTE_IDS,
   compressNote,
+  countUnchangedNotes,
   decompressNote,
   isSafeAttachmentDataUrl,
   parseSyncMessage,
@@ -126,6 +127,80 @@ describe('parseSyncMessage', () => {
     }
 
     expect(parseSyncMessage({ type: 'done' })).toEqual({ type: 'done' });
+
+    expect(
+      parseSyncMessage({
+        type: 'ack',
+        sessionId: 'sess-1',
+        transferId: 'tx-1',
+        noteId: 'n1',
+        ok: true,
+      })
+    ).toEqual({
+      type: 'ack',
+      sessionId: 'sess-1',
+      transferId: 'tx-1',
+      noteId: 'n1',
+      ok: true,
+    });
+
+    expect(
+      parseSyncMessage({
+        type: 'note-error',
+        sessionId: 'sess-1',
+        noteId: 'n1',
+        reason: 'Note not found',
+      })
+    ).toEqual({
+      type: 'note-error',
+      sessionId: 'sess-1',
+      noteId: 'n1',
+      reason: 'Note not found',
+    });
+  });
+
+  it('rejects invalid ack, note-error, and invalid session/transfer metadata fields', () => {
+    expect(parseSyncMessage({ type: 'ack' })).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'ack', sessionId: '', transferId: 'tx', noteId: 'n1', ok: true })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'ack', sessionId: 's1', transferId: 'tx', noteId: 'n1', ok: 'yes' })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'ack',
+        sessionId: 's1',
+        transferId: 'tx',
+        noteId: 'n1',
+        ok: false,
+        error: 'bad\nerror',
+      })
+    ).toBeNull();
+    expect(parseSyncMessage({ type: 'note-error', sessionId: 's1', noteId: '' })).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'manifest', entries: [], sessionId: 123 })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'manifest', entries: [], wantsManifest: 'true' })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'note', payload: [1, 2], transferId: 'bad\nid' })
+    ).toBeNull();
+  });
+
+  it('counts unchanged notes accurately across local and peer manifests', () => {
+    const local = [
+      { noteId: 'a', contentHash: 'h1', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'b', contentHash: 'h2', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'c', contentHash: 'h3', updatedAt: '2026-01-01T00:00:00.000Z' },
+    ];
+    const peer = [
+      { noteId: 'a', contentHash: 'h1', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'b', contentHash: 'h2-new', updatedAt: '2026-01-02T00:00:00.000Z' },
+      { noteId: 'd', contentHash: 'h4', updatedAt: '2026-01-02T00:00:00.000Z' },
+    ];
+    expect(countUnchangedNotes(local, peer, ['b', 'd'], ['c'])).toBe(1);
   });
 
   it('rejects malformed and oversized manifests', () => {

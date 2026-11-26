@@ -18,7 +18,11 @@ export function SyncButton({ syncStatus, connectedCount, onSync }: SyncButtonPro
   function label(): string {
     if (syncStatus.stage === 'connecting') return 'Connecting…';
     if (syncStatus.stage === 'exchanging') return 'Exchanging…';
-    if (syncStatus.stage === 'transferring') return `Syncing ${syncStatus.progress}/${syncStatus.total}`;
+    if (syncStatus.stage === 'transferring') {
+      return syncStatus.total > 0
+        ? `Syncing ${syncStatus.progress}/${syncStatus.total}`
+        : 'Syncing…';
+    }
     if (syncStatus.stage === 'done') return 'Sync done ✓';
     if (syncStatus.stage === 'error') return 'Error';
     return 'Sync';

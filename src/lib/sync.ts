@@ -21,15 +21,42 @@ const MAX_ID_LENGTH = 128;
 const MAX_HASH_LENGTH = 128;
 const MAX_TIMESTAMP_LENGTH = 64;
 const MAX_ATTACHMENT_NAME_LENGTH = 256;
+const MAX_ERROR_MESSAGE_LENGTH = 256;
 const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SAFE_ATTACHMENT_DATA_URL_RE =
   /^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/i;
 
 /** Validated incoming/outgoing sync protocol message */
 export type SyncMessage =
-  | { type: 'manifest'; entries: ManifestEntry[] }
-  | { type: 'request'; noteIds: string[] }
-  | { type: 'note'; payload: Uint8Array }
+  | {
+      type: 'manifest';
+      entries: ManifestEntry[];
+      sessionId?: string;
+      wantsManifest?: boolean;
+      inReplyTo?: string;
+    }
+  | { type: 'request'; noteIds: string[]; sessionId?: string }
+  | {
+      type: 'note';
+      payload: Uint8Array;
+      sessionId?: string;
+      transferId?: string;
+      noteId?: string;
+    }
+  | {
+      type: 'ack';
+      sessionId: string;
+      transferId: string;
+      noteId: string;
+      ok: boolean;
+      error?: string;
+    }
+  | {
+      type: 'note-error';
+      sessionId: string;
+      noteId: string;
+      reason?: string;
+    }
   | { type: 'done' };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -177,6 +204,15 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
       if (!Array.isArray(data.entries) || data.entries.length > MAX_MANIFEST_ENTRIES) {
         return null;
       }
+      if (data.sessionId !== undefined && !isValidNoteId(data.sessionId)) {
+        return null;
+      }
+      if (data.wantsManifest !== undefined && typeof data.wantsManifest !== 'boolean') {
+        return null;
+      }
+      if (data.inReplyTo !== undefined && !isValidNoteId(data.inReplyTo)) {
+        return null;
+      }
       const entries: ManifestEntry[] = [];
       for (const item of data.entries) {
         if (!isPlainObject(item)) return null;
@@ -189,11 +225,20 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
           updatedAt: item.updatedAt,
         });
       }
-      return { type: 'manifest', entries };
+      return {
+        type: 'manifest',
+        entries,
+        ...(data.sessionId !== undefined ? { sessionId: data.sessionId } : {}),
+        ...(data.wantsManifest !== undefined ? { wantsManifest: data.wantsManifest } : {}),
+        ...(data.inReplyTo !== undefined ? { inReplyTo: data.inReplyTo } : {}),
+      };
     }
 
     case 'request': {
       if (!Array.isArray(data.noteIds) || data.noteIds.length > MAX_REQUEST_NOTE_IDS) {
+        return null;
+      }
+      if (data.sessionId !== undefined && !isValidNoteId(data.sessionId)) {
         return null;
       }
       const noteIds: string[] = [];
@@ -201,10 +246,28 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         if (!isValidNoteId(noteId)) return null;
         noteIds.push(noteId);
       }
-      return { type: 'request', noteIds };
+      return {
+        type: 'request',
+        noteIds,
+        ...(data.sessionId !== undefined ? { sessionId: data.sessionId } : {}),
+      };
     }
 
     case 'note': {
+      if (data.sessionId !== undefined && !isValidNoteId(data.sessionId)) {
+        return null;
+      }
+      if (data.transferId !== undefined && !isValidNoteId(data.transferId)) {
+        return null;
+      }
+      if (data.noteId !== undefined && !isValidNoteId(data.noteId)) {
+        return null;
+      }
+      const extraMeta = {
+        ...(data.sessionId !== undefined ? { sessionId: data.sessionId } : {}),
+        ...(data.transferId !== undefined ? { transferId: data.transferId } : {}),
+        ...(data.noteId !== undefined ? { noteId: data.noteId } : {}),
+      };
       const rawPayload = data.payload;
       if (rawPayload instanceof Uint8Array) {
         if (
@@ -213,7 +276,7 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         ) {
           return null;
         }
-        return { type: 'note', payload: rawPayload };
+        return { type: 'note', payload: rawPayload, ...extraMeta };
       }
 
       if (Array.isArray(rawPayload)) {
@@ -236,10 +299,52 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
           }
           bytes[i] = byte;
         }
-        return { type: 'note', payload: bytes };
+        return { type: 'note', payload: bytes, ...extraMeta };
       }
 
       return null;
+    }
+
+    case 'ack': {
+      if (!isValidNoteId(data.sessionId)) return null;
+      if (!isValidNoteId(data.transferId)) return null;
+      if (!isValidNoteId(data.noteId)) return null;
+      if (typeof data.ok !== 'boolean') return null;
+      if (
+        data.error !== undefined &&
+        (typeof data.error !== 'string' ||
+          data.error.length > MAX_ERROR_MESSAGE_LENGTH ||
+          hasControlChars(data.error))
+      ) {
+        return null;
+      }
+      return {
+        type: 'ack',
+        sessionId: data.sessionId,
+        transferId: data.transferId,
+        noteId: data.noteId,
+        ok: data.ok,
+        ...(data.error !== undefined ? { error: data.error } : {}),
+      };
+    }
+
+    case 'note-error': {
+      if (!isValidNoteId(data.sessionId)) return null;
+      if (!isValidNoteId(data.noteId)) return null;
+      if (
+        data.reason !== undefined &&
+        (typeof data.reason !== 'string' ||
+          data.reason.length > MAX_ERROR_MESSAGE_LENGTH ||
+          hasControlChars(data.reason))
+      ) {
+        return null;
+      }
+      return {
+        type: 'note-error',
+        sessionId: data.sessionId,
+        noteId: data.noteId,
+        ...(data.reason !== undefined ? { reason: data.reason } : {}),
+      };
     }
 
     case 'done':
@@ -300,6 +405,29 @@ export function computeDiff(
   }
 
   return toRequest;
+}
+
+/**
+ * Count notes across local and peer manifests that are identical or require no transfer.
+ */
+export function countUnchangedNotes(
+  localManifest: ManifestEntry[],
+  peerManifest: ManifestEntry[],
+  toRequestFromPeer: string[],
+  peerRequestsFromLocal: string[]
+): number {
+  const transferred = new Set([...toRequestFromPeer, ...peerRequestsFromLocal]);
+  const allIds = new Set([
+    ...localManifest.map((e) => e.noteId),
+    ...peerManifest.map((e) => e.noteId),
+  ]);
+  let unchanged = 0;
+  for (const id of allIds) {
+    if (!transferred.has(id)) {
+      unchanged++;
+    }
+  }
+  return unchanged;
 }
 
 /** Compress a Note object to a Uint8Array using CompressionStream (gzip) */

@@ -55,11 +55,19 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   const [content, setContent] = useState(note.content);
   const noteIdRef = useRef(note.id);
   const lastWrittenRef = useRef({ title: note.title, content: note.content });
+  const draftRef = useRef({ title: note.title, content: note.content });
+  const dirtyFieldsRef = useRef({ title: false, content: false });
 
   useEffect(() => {
     if (note.id !== noteIdRef.current) {
+      if (saveTimeout.current) {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = null;
+      }
       noteIdRef.current = note.id;
+      dirtyFieldsRef.current = { title: false, content: false };
       lastWrittenRef.current = { title: note.title, content: note.content };
+      draftRef.current = { title: note.title, content: note.content };
       setTitle(note.title);
       setContent(note.content);
       setShowDrawing(false);
@@ -69,16 +77,37 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     }
 
     const last = lastWrittenRef.current;
-    if (note.title !== last.title || note.content !== last.content) {
+    const titleChangedFromProp = note.title !== last.title;
+    const contentChangedFromProp = note.content !== last.content;
+
+    if (titleChangedFromProp || contentChangedFromProp) {
+      lastWrittenRef.current = { title: note.title, content: note.content };
+
+      // Preserve unsaved local edits while still accepting non-dirty synced fields.
+      if (titleChangedFromProp && !dirtyFieldsRef.current.title) {
+        draftRef.current.title = note.title;
+        setTitle(note.title);
+      }
+      if (contentChangedFromProp && !dirtyFieldsRef.current.content) {
+        draftRef.current.content = note.content;
+        setContent(note.content);
+      }
+
+      if (!dirtyFieldsRef.current.title && !dirtyFieldsRef.current.content && saveTimeout.current) {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = null;
+      }
+    }
+  }, [note.id, note.title, note.content]);
+
+  useEffect(() => {
+    return () => {
       if (saveTimeout.current) {
         clearTimeout(saveTimeout.current);
         saveTimeout.current = null;
       }
-      lastWrittenRef.current = { title: note.title, content: note.content };
-      setTitle(note.title);
-      setContent(note.content);
-    }
-  }, [note.id, note.title, note.content]);
+    };
+  }, []);
 
   // Press ESC to exit full screen mode
   useEffect(() => {
@@ -92,28 +121,31 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   }, [fullScreenMode]);
 
   const scheduleUpdate = useCallback(
-    (patch: Partial<Pick<Note, 'title' | 'content'>>) => {
+    (nextDraft: { title: string; content: string }, dirtyField: 'title' | 'content') => {
+      draftRef.current = nextDraft;
+      dirtyFieldsRef.current[dirtyField] = true;
       if (saveTimeout.current) clearTimeout(saveTimeout.current);
       saveTimeout.current = setTimeout(() => {
         saveTimeout.current = null;
-        lastWrittenRef.current = {
-          title: patch.title ?? title,
-          content: patch.content ?? content,
-        };
-        onUpdate(patch);
+        const snapshot = { ...draftRef.current };
+        dirtyFieldsRef.current = { title: false, content: false };
+        lastWrittenRef.current = snapshot;
+        onUpdate(snapshot);
       }, 350);
     },
-    [onUpdate, title, content]
+    [onUpdate]
   );
 
   const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setTitle(e.target.value);
-    scheduleUpdate({ title: e.target.value, content });
+    const nextTitle = e.target.value;
+    setTitle(nextTitle);
+    scheduleUpdate({ title: nextTitle, content: draftRef.current.content }, 'title');
   };
 
   const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    setContent(e.target.value);
-    scheduleUpdate({ title, content: e.target.value });
+    const nextContent = e.target.value;
+    setContent(nextContent);
+    scheduleUpdate({ title: draftRef.current.title, content: nextContent }, 'content');
   };
 
   /* ── Markdown insertion helpers ── */
@@ -127,7 +159,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     ta.focus();
     const pos = s + before.length + selected.length + after.length;
     requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title, content: next });
+    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
   }
 
   function insertAtLine(prefix: string) {
@@ -140,7 +172,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     ta.focus();
     const pos = s + prefix.length;
     requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title, content: next });
+    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
   }
 
   function insertFull(before: string, after: string, placeholder: string) {
@@ -155,7 +187,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       ta.value = next;
       ta.setSelectionRange(s + before.length, s + before.length + selected.length);
     });
-    scheduleUpdate({ title, content: next });
+    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
   }
 
   function insertText(text: string) {
@@ -169,13 +201,17 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     ta.focus();
     const pos = s + before.length + text.length + after.length;
     requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title, content: next });
+    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
   }
 
   async function handleImageUpload(file: File) {
     setUploadError(null);
     try {
       const dataUrl = await processImageUpload(file);
+      if (saveTimeout.current) {
+        clearTimeout(saveTimeout.current);
+        saveTimeout.current = null;
+      }
       const attachments = { ...note.attachments };
       const label = uniqueLabel(attachments, file.name);
       attachments[label] = {
@@ -183,10 +219,14 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         data: dataUrl,
         createdAt: new Date().toISOString(),
       };
-      const newContent = content + (content && !content.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
+      const curContent = draftRef.current.content;
+      const curTitle = draftRef.current.title;
+      const newContent = curContent + (curContent && !curContent.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
+      draftRef.current = { title: curTitle, content: newContent };
+      dirtyFieldsRef.current = { title: false, content: false };
+      lastWrittenRef.current = { title: curTitle, content: newContent };
       setContent(newContent);
-      lastWrittenRef.current = { title, content: newContent };
-      onUpdate({ attachments, content: newContent, title });
+      onUpdate({ attachments, content: newContent, title: curTitle });
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Could not add that image. Please try another file.';
@@ -196,6 +236,10 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function handleDrawingInsert(dataUrl: string) {
     setUploadError(null);
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      saveTimeout.current = null;
+    }
     const attachments = { ...note.attachments };
     const label = uniqueLabel(attachments, 'drawing');
     attachments[label] = {
@@ -203,10 +247,14 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       data: dataUrl,
       createdAt: new Date().toISOString(),
     };
-    const newContent = content + (content && !content.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
+    const curContent = draftRef.current.content;
+    const curTitle = draftRef.current.title;
+    const newContent = curContent + (curContent && !curContent.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
+    draftRef.current = { title: curTitle, content: newContent };
+    dirtyFieldsRef.current = { title: false, content: false };
+    lastWrittenRef.current = { title: curTitle, content: newContent };
     setContent(newContent);
-    lastWrittenRef.current = { title, content: newContent };
-    onUpdate({ attachments, content: newContent, title });
+    onUpdate({ attachments, content: newContent, title: curTitle });
     setShowDrawing(false);
   }
 
