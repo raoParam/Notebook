@@ -189,18 +189,30 @@ describe('parseSyncMessage', () => {
     ).toBeNull();
   });
 
-  it('counts unchanged notes accurately across local and peer manifests', () => {
+  it('counts unchanged notes accurately for identical, differing, equal-timestamp conflict, and single-device notes', () => {
     const local = [
-      { noteId: 'a', contentHash: 'h1', updatedAt: '2026-01-01T00:00:00.000Z' },
-      { noteId: 'b', contentHash: 'h2', updatedAt: '2026-01-01T00:00:00.000Z' },
-      { noteId: 'c', contentHash: 'h3', updatedAt: '2026-01-01T00:00:00.000Z' },
+      // Identical hashes -> unchanged
+      { noteId: 'identical', contentHash: 'h-same', updatedAt: '2026-01-01T00:00:00.000Z' },
+      // Identical hashes even with different timestamps -> unchanged
+      { noteId: 'identical-diff-ts', contentHash: 'h-same-2', updatedAt: '2026-01-01T00:00:00.000Z' },
+      // Different hashes with newer timestamp (will be transferred) -> not unchanged
+      { noteId: 'diff-newer', contentHash: 'h-old', updatedAt: '2026-01-01T00:00:00.000Z' },
+      // Different hashes with equal timestamps (unresolved LWW conflict) -> NOT unchanged
+      { noteId: 'conflict-equal-ts', contentHash: 'h-local', updatedAt: '2026-01-02T00:00:00.000Z' },
+      // Present only on local device (even if omitted from peer request list) -> NOT unchanged
+      { noteId: 'only-local', contentHash: 'h-local-only', updatedAt: '2026-01-01T00:00:00.000Z' },
     ];
     const peer = [
-      { noteId: 'a', contentHash: 'h1', updatedAt: '2026-01-01T00:00:00.000Z' },
-      { noteId: 'b', contentHash: 'h2-new', updatedAt: '2026-01-02T00:00:00.000Z' },
-      { noteId: 'd', contentHash: 'h4', updatedAt: '2026-01-02T00:00:00.000Z' },
+      { noteId: 'identical', contentHash: 'h-same', updatedAt: '2026-01-01T00:00:00.000Z' },
+      { noteId: 'identical-diff-ts', contentHash: 'h-same-2', updatedAt: '2026-01-03T00:00:00.000Z' },
+      { noteId: 'diff-newer', contentHash: 'h-new', updatedAt: '2026-01-04T00:00:00.000Z' },
+      { noteId: 'conflict-equal-ts', contentHash: 'h-peer', updatedAt: '2026-01-02T00:00:00.000Z' },
+      // Present only on peer device -> NOT unchanged
+      { noteId: 'only-peer', contentHash: 'h-peer-only', updatedAt: '2026-01-01T00:00:00.000Z' },
     ];
-    expect(countUnchangedNotes(local, peer, ['b', 'd'], ['c'])).toBe(1);
+
+    expect(countUnchangedNotes(local, peer, ['diff-newer', 'only-peer'], [])).toBe(2);
+    expect(countUnchangedNotes(local, peer, ['diff-newer', 'only-peer'], ['only-local'])).toBe(2);
   });
 
   it('rejects malformed and oversized manifests', () => {

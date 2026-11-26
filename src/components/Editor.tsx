@@ -14,7 +14,10 @@ import { DrawingCanvas } from './DrawingCanvas';
 
 interface EditorProps {
   note: Note;
-  onUpdate: (patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>) => void;
+  onUpdate: (
+    patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>,
+    noteId?: string
+  ) => void;
   onImportNote: (title: string, content: string) => void;
   onExportPdf: () => void;
   onExportMd: () => void;
@@ -57,13 +60,33 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   const lastWrittenRef = useRef({ title: note.title, content: note.content });
   const draftRef = useRef({ title: note.title, content: note.content });
   const dirtyFieldsRef = useRef({ title: false, content: false });
+  const pendingSaveRef = useRef<{
+    noteId: string;
+    onUpdate: EditorProps['onUpdate'];
+  } | null>(null);
+
+  const flushPendingSave = useCallback(() => {
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      saveTimeout.current = null;
+    }
+    const pending = pendingSaveRef.current;
+    const isDirty = dirtyFieldsRef.current.title || dirtyFieldsRef.current.content;
+    if (!pending || !isDirty) {
+      pendingSaveRef.current = null;
+      return;
+    }
+
+    const snapshot = { ...draftRef.current };
+    pendingSaveRef.current = null;
+    dirtyFieldsRef.current = { title: false, content: false };
+    lastWrittenRef.current = snapshot;
+    pending.onUpdate(snapshot, pending.noteId);
+  }, []);
 
   useEffect(() => {
     if (note.id !== noteIdRef.current) {
-      if (saveTimeout.current) {
-        clearTimeout(saveTimeout.current);
-        saveTimeout.current = null;
-      }
+      flushPendingSave();
       noteIdRef.current = note.id;
       dirtyFieldsRef.current = { title: false, content: false };
       lastWrittenRef.current = { title: note.title, content: note.content };
@@ -96,18 +119,16 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       if (!dirtyFieldsRef.current.title && !dirtyFieldsRef.current.content && saveTimeout.current) {
         clearTimeout(saveTimeout.current);
         saveTimeout.current = null;
+        pendingSaveRef.current = null;
       }
     }
-  }, [note.id, note.title, note.content]);
+  }, [flushPendingSave, note.id, note.title, note.content]);
 
   useEffect(() => {
     return () => {
-      if (saveTimeout.current) {
-        clearTimeout(saveTimeout.current);
-        saveTimeout.current = null;
-      }
+      flushPendingSave();
     };
-  }, []);
+  }, [flushPendingSave]);
 
   // Press ESC to exit full screen mode
   useEffect(() => {
@@ -122,15 +143,21 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   const scheduleUpdate = useCallback(
     (nextDraft: { title: string; content: string }, dirtyField: 'title' | 'content') => {
+      const targetNoteId = noteIdRef.current;
       draftRef.current = nextDraft;
       dirtyFieldsRef.current[dirtyField] = true;
+      pendingSaveRef.current = { noteId: targetNoteId, onUpdate };
       if (saveTimeout.current) clearTimeout(saveTimeout.current);
       saveTimeout.current = setTimeout(() => {
         saveTimeout.current = null;
+        const pending = pendingSaveRef.current;
+        pendingSaveRef.current = null;
         const snapshot = { ...draftRef.current };
         dirtyFieldsRef.current = { title: false, content: false };
         lastWrittenRef.current = snapshot;
-        onUpdate(snapshot);
+        const saveFn = pending?.onUpdate ?? onUpdate;
+        const saveId = pending?.noteId ?? targetNoteId;
+        saveFn(snapshot, saveId);
       }, 350);
     },
     [onUpdate]
@@ -207,11 +234,13 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   async function handleImageUpload(file: File) {
     setUploadError(null);
     try {
+      const targetNoteId = noteIdRef.current;
       const dataUrl = await processImageUpload(file);
       if (saveTimeout.current) {
         clearTimeout(saveTimeout.current);
         saveTimeout.current = null;
       }
+      pendingSaveRef.current = null;
       const attachments = { ...note.attachments };
       const label = uniqueLabel(attachments, file.name);
       attachments[label] = {
@@ -226,7 +255,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       dirtyFieldsRef.current = { title: false, content: false };
       lastWrittenRef.current = { title: curTitle, content: newContent };
       setContent(newContent);
-      onUpdate({ attachments, content: newContent, title: curTitle });
+      onUpdate({ attachments, content: newContent, title: curTitle }, targetNoteId);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Could not add that image. Please try another file.';
@@ -236,10 +265,12 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function handleDrawingInsert(dataUrl: string) {
     setUploadError(null);
+    const targetNoteId = noteIdRef.current;
     if (saveTimeout.current) {
       clearTimeout(saveTimeout.current);
       saveTimeout.current = null;
     }
+    pendingSaveRef.current = null;
     const attachments = { ...note.attachments };
     const label = uniqueLabel(attachments, 'drawing');
     attachments[label] = {
@@ -254,7 +285,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     dirtyFieldsRef.current = { title: false, content: false };
     lastWrittenRef.current = { title: curTitle, content: newContent };
     setContent(newContent);
-    onUpdate({ attachments, content: newContent, title: curTitle });
+    onUpdate({ attachments, content: newContent, title: curTitle }, targetNoteId);
     setShowDrawing(false);
   }
 

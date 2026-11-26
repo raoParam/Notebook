@@ -408,7 +408,9 @@ export function computeDiff(
 }
 
 /**
- * Count notes across local and peer manifests that are identical or require no transfer.
+ * Count notes present on both devices with identical content hashes (and not transferred).
+ * Notes present on only one device or with differing hashes (including equal-timestamp
+ * unresolved conflicts) are never counted as unchanged.
  */
 export function countUnchangedNotes(
   localManifest: ManifestEntry[],
@@ -417,13 +419,12 @@ export function countUnchangedNotes(
   peerRequestsFromLocal: string[]
 ): number {
   const transferred = new Set([...toRequestFromPeer, ...peerRequestsFromLocal]);
-  const allIds = new Set([
-    ...localManifest.map((e) => e.noteId),
-    ...peerManifest.map((e) => e.noteId),
-  ]);
+  const peerMap = new Map(peerManifest.map((e) => [e.noteId, e]));
   let unchanged = 0;
-  for (const id of allIds) {
-    if (!transferred.has(id)) {
+  for (const localEntry of localManifest) {
+    if (transferred.has(localEntry.noteId)) continue;
+    const peerEntry = peerMap.get(localEntry.noteId);
+    if (peerEntry && localEntry.contentHash === peerEntry.contentHash) {
       unchanged++;
     }
   }

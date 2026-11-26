@@ -67,9 +67,13 @@ export default function NotebookPage() {
   );
 
   const handleUpdateNote = useCallback(
-    (patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>) => {
-      if (!activeId) return;
-      updateNote(activeId, patch);
+    (
+      patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>,
+      targetNoteId?: string
+    ) => {
+      const id = targetNoteId ?? activeId;
+      if (!id) return;
+      updateNote(id, patch);
     },
     [activeId, updateNote]
   );
