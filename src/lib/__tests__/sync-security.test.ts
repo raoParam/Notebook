@@ -187,6 +187,12 @@ describe('parseSyncMessage', () => {
       parseSyncMessage({ type: 'manifest', entries: [], wantsManifest: 'true' })
     ).toBeNull();
     expect(
+      parseSyncMessage({ type: 'manifest', entries: [], autoSync: 'true' })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'manifest', entries: [], autoSync: true })
+    ).toEqual({ type: 'manifest', entries: [], autoSync: true });
+    expect(
       parseSyncMessage({ type: 'note', payload: [1, 2], transferId: 'bad\nid' })
     ).toBeNull();
   });

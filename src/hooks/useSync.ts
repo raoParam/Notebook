@@ -98,6 +98,7 @@ interface PeerRunState {
   inboundManifestReceived: boolean;
   pendingOutgoing: Map<string, string>; // transferId -> noteId
   pendingIncomingIds: Set<string>;
+  syncedIncomingEntries: Map<string, ManifestEntry>;
   sentCount: number;
   receivedCount: number;
   failedCount: number;
@@ -132,7 +133,20 @@ interface OutboundResponderSession {
   peerId: string;
   allowedNoteIds: Set<string>;
   requestHandled: boolean;
+  isAutoSync: boolean;
   createdAt: number;
+}
+
+interface InboundResponderSession {
+  sessionId: string;
+  pairingId: string;
+  peerId: string;
+  allowedNoteIds: Set<string>;
+  pendingNoteIds: Set<string>;
+  isAutoSync: boolean;
+  createdAt: number;
+  expiresAt: number;
+  timeoutId: ReturnType<typeof setTimeout> | null;
 }
 
 interface PendingAckEntry {
@@ -174,6 +188,7 @@ export function useSync(onNotesChanged: () => void) {
   const autoSyncEnabledRef = useRef<boolean>(false);
   const peerAutoSyncRef = useRef<Map<string, boolean>>(new Map());
   const autoRunsRef = useRef<Map<string, AutoSyncRun>>(new Map());
+  const startingAutoRunsRef = useRef<Set<string>>(new Set());
   const autoDebounceTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const autoPendingResyncRef = useRef<Set<string>>(new Set());
   const lastAutoSyncedDigestRef = useRef<Map<string, string>>(new Map());
@@ -184,6 +199,7 @@ export function useSync(onNotesChanged: () => void) {
 
   const processedManifestSessionsRef = useRef<Map<string, number>>(new Map());
   const outboundRespondersRef = useRef<Map<string, OutboundResponderSession>>(new Map());
+  const inboundRespondersRef = useRef<Map<string, InboundResponderSession>>(new Map());
   const pendingAcksRef = useRef<Map<string, PendingAckEntry>>(new Map());
   const processedIncomingTransfersRef = useRef<Map<string, CachedTransferAck>>(new Map());
   const handledNoteErrorsRef = useRef<Map<string, number>>(new Map());
@@ -227,6 +243,7 @@ export function useSync(onNotesChanged: () => void) {
       autoDebounceTimersRef.current.delete(key);
     }
     autoPendingResyncRef.current.delete(key);
+    lastAutoSyncedDigestRef.current.delete(key);
 
     const autoRun = autoRunsRef.current.get(key);
     if (autoRun) {
@@ -242,15 +259,38 @@ export function useSync(onNotesChanged: () => void) {
         }
       }
     }
+
+    for (const [rKey, session] of inboundRespondersRef.current) {
+      if (session.isAutoSync && peerCompositeKey(session.pairingId, session.peerId) === key) {
+        if (session.timeoutId !== null) {
+          clearTimeout(session.timeoutId);
+        }
+        inboundRespondersRef.current.delete(rKey);
+      }
+    }
+    for (const [sId, session] of outboundRespondersRef.current) {
+      if (session.isAutoSync && peerCompositeKey(session.pairingId, session.peerId) === key) {
+        outboundRespondersRef.current.delete(sId);
+      }
+    }
   }, []);
 
   const pruneStaleBookkeeping = useCallback(() => {
-    const cutoff = Date.now() - SESSION_TTL_MS;
+    const now = Date.now();
+    const cutoff = now - SESSION_TTL_MS;
     for (const [k, ts] of processedManifestSessionsRef.current) {
       if (ts < cutoff) processedManifestSessionsRef.current.delete(k);
     }
     for (const [k, session] of outboundRespondersRef.current) {
       if (session.createdAt < cutoff) outboundRespondersRef.current.delete(k);
+    }
+    for (const [k, session] of inboundRespondersRef.current) {
+      if (session.expiresAt < now) {
+        if (session.timeoutId !== null) {
+          clearTimeout(session.timeoutId);
+        }
+        inboundRespondersRef.current.delete(k);
+      }
     }
     for (const [k, entry] of pendingAcksRef.current) {
       const activeAuto = Array.from(autoRunsRef.current.values()).some(
@@ -285,6 +325,156 @@ export function useSync(onNotesChanged: () => void) {
       }
     },
     []
+  );
+
+  const evaluateAutoRunCompletionRef = useRef<(autoRun: AutoSyncRun) => void>(() => {});
+
+  const startAutoSyncForPeer = useCallback(
+    async (pairingId: string, peerId: string, reason: 'handshake' | 'local-change') => {
+      const key = peerCompositeKey(pairingId, peerId);
+      if (
+        isUnmountedRef.current ||
+        !autoSyncEnabledRef.current ||
+        peerAutoSyncRef.current.get(key) !== true
+      ) {
+        return;
+      }
+
+      const isConnected = connectedPeersRef.current.some(
+        (p) => p.pairingId === pairingId && p.peerId === peerId
+      );
+      if (!isConnected || !roomsRef.current.has(pairingId)) {
+        return;
+      }
+
+      // Never collide with an active manual sync or an already active/starting auto-sync on this peer
+      const manualBusyWithPeer =
+        activeRunRef.current !== null &&
+        !activeRunRef.current.settled &&
+        activeRunRef.current.peers.has(key);
+      if (
+        manualBusyWithPeer ||
+        autoRunsRef.current.has(key) ||
+        startingAutoRunsRef.current.has(key)
+      ) {
+        if (reason === 'local-change') {
+          autoPendingResyncRef.current.add(key);
+        }
+        return;
+      }
+
+      startingAutoRunsRef.current.add(key);
+
+      try {
+        while (true) {
+          pruneStaleBookkeeping();
+          const localManifest = await buildLocalManifest(db);
+          if (
+            isUnmountedRef.current ||
+            !autoSyncEnabledRef.current ||
+            peerAutoSyncRef.current.get(key) !== true
+          ) {
+            return;
+          }
+
+          const stillConnected = connectedPeersRef.current.some(
+            (p) => p.pairingId === pairingId && p.peerId === peerId
+          );
+          if (!stillConnected || !roomsRef.current.has(pairingId)) {
+            return;
+          }
+
+          const manualBecameBusy =
+            activeRunRef.current !== null &&
+            !activeRunRef.current.settled &&
+            activeRunRef.current.peers.has(key);
+          if (manualBecameBusy || autoRunsRef.current.has(key)) {
+            if (reason === 'local-change') {
+              autoPendingResyncRef.current.add(key);
+            }
+            return;
+          }
+
+          const digest = computeManifestDigest(localManifest);
+          if (
+            reason === 'local-change' &&
+            lastAutoSyncedDigestRef.current.get(key) === digest
+          ) {
+            if (autoPendingResyncRef.current.has(key)) {
+              autoPendingResyncRef.current.delete(key);
+              continue;
+            }
+            return;
+          }
+
+          const runId = crypto.randomUUID();
+          const outboundSessionId = crypto.randomUUID();
+
+          const peerRun: PeerRunState = {
+            key,
+            pairingId,
+            peerId,
+            mode: 'auto',
+            outboundSessionId,
+            inboundSessionId: null,
+            localManifest,
+            allowedOutboundIds: new Set(localManifest.map((e) => e.noteId)),
+            allowedIncomingIds: null,
+            outboundRequestReceived: false,
+            outboundSendingInProgress: false,
+            inboundManifestReceived: false,
+            pendingOutgoing: new Map(),
+            pendingIncomingIds: new Set(),
+            syncedIncomingEntries: new Map(),
+            sentCount: 0,
+            receivedCount: 0,
+            failedCount: 0,
+            unchangedCount: 0,
+            disconnected: false,
+            done: false,
+          };
+
+          const autoRun: AutoSyncRun = {
+            runId,
+            peer: peerRun,
+            timeoutId: null,
+            settled: false,
+          };
+
+          autoRun.timeoutId = setTimeout(() => {
+            if (autoRunsRef.current.get(key) === autoRun && !autoRun.settled) {
+              peerRun.failedCount++;
+              peerRun.disconnected = true;
+              evaluateAutoRunCompletionRef.current(autoRun);
+            }
+          }, SYNC_TIMEOUT_MS);
+
+          autoRunsRef.current.set(key, autoRun);
+
+          const sentOk = await sendForPairing(
+            pairingId,
+            {
+              type: 'manifest',
+              sessionId: outboundSessionId,
+              entries: localManifest,
+              wantsManifest: true,
+              autoSync: true,
+            },
+            peerId
+          );
+
+          if (!sentOk && autoRunsRef.current.get(key) === autoRun && !autoRun.settled) {
+            peerRun.failedCount++;
+            peerRun.disconnected = true;
+            evaluateAutoRunCompletionRef.current(autoRun);
+          }
+          break;
+        }
+      } finally {
+        startingAutoRunsRef.current.delete(key);
+      }
+    },
+    [pruneStaleBookkeeping, sendForPairing]
   );
 
   const evaluateManualRunCompletion = useCallback(
@@ -357,13 +547,25 @@ export function useSync(onNotesChanged: () => void) {
         });
       }
       scheduleIdleReset();
-    },
-    [scheduleIdleReset]
-  );
 
-  const startAutoSyncForPeerRef = useRef<
-    (pairingId: string, peerId: string, reason: 'handshake' | 'local-change') => Promise<void>
-  >(async () => {});
+      if (!isUnmountedRef.current && autoSyncEnabledRef.current) {
+        for (const peerRun of run.peers.values()) {
+          if (
+            autoPendingResyncRef.current.has(peerRun.key) &&
+            peerAutoSyncRef.current.get(peerRun.key) === true
+          ) {
+            autoPendingResyncRef.current.delete(peerRun.key);
+            void startAutoSyncForPeer(
+              peerRun.pairingId,
+              peerRun.peerId,
+              'local-change'
+            );
+          }
+        }
+      }
+    },
+    [scheduleIdleReset, startAutoSyncForPeer]
+  );
 
   const evaluateAutoRunCompletion = useCallback((autoRun: AutoSyncRun) => {
     const peerRun = autoRun.peer;
@@ -393,140 +595,33 @@ export function useSync(onNotesChanged: () => void) {
       }
     }
 
-    void (async () => {
-      if (peerRun.failedCount === 0 && !peerRun.disconnected) {
-        const latestManifest = await buildLocalManifest(db);
-        lastAutoSyncedDigestRef.current.set(
-          peerRun.key,
-          computeManifestDigest(latestManifest)
-        );
+    // Record only the manifest state actually synchronized by this run (its initial snapshot
+    // merged with notes received and persisted during this exchange), never post-snapshot edits.
+    if (peerRun.failedCount === 0 && !peerRun.disconnected) {
+      const syncedMap = new Map(peerRun.localManifest.map((e) => [e.noteId, e]));
+      for (const [noteId, entry] of peerRun.syncedIncomingEntries) {
+        syncedMap.set(noteId, entry);
       }
-      if (
-        !isUnmountedRef.current &&
-        autoPendingResyncRef.current.has(peerRun.key) &&
-        autoSyncEnabledRef.current &&
-        peerAutoSyncRef.current.get(peerRun.key) === true
-      ) {
-        autoPendingResyncRef.current.delete(peerRun.key);
-        void startAutoSyncForPeerRef.current(peerRun.pairingId, peerRun.peerId, 'local-change');
-      }
-    })();
-  }, []);
-
-  const startAutoSyncForPeer = useCallback(
-    async (pairingId: string, peerId: string, reason: 'handshake' | 'local-change') => {
-      const key = peerCompositeKey(pairingId, peerId);
-      if (
-        isUnmountedRef.current ||
-        !autoSyncEnabledRef.current ||
-        peerAutoSyncRef.current.get(key) !== true
-      ) {
-        return;
-      }
-
-      const isConnected = connectedPeersRef.current.some(
-        (p) => p.pairingId === pairingId && p.peerId === peerId
+      lastAutoSyncedDigestRef.current.set(
+        peerRun.key,
+        computeManifestDigest(Array.from(syncedMap.values()))
       );
-      if (!isConnected || !roomsRef.current.has(pairingId)) {
-        return;
-      }
+    }
 
-      // Never collide with an active manual sync or an already active auto-sync on this peer
-      const manualBusyWithPeer =
-        activeRunRef.current !== null &&
-        !activeRunRef.current.settled &&
-        activeRunRef.current.peers.has(key);
-      if (manualBusyWithPeer || autoRunsRef.current.has(key)) {
-        if (reason === 'local-change') {
-          autoPendingResyncRef.current.add(key);
-        }
-        return;
-      }
-
-      pruneStaleBookkeeping();
-      const localManifest = await buildLocalManifest(db);
-      if (
-        isUnmountedRef.current ||
-        !autoSyncEnabledRef.current ||
-        peerAutoSyncRef.current.get(key) !== true
-      ) {
-        return;
-      }
-
-      const digest = computeManifestDigest(localManifest);
-      if (
-        reason === 'local-change' &&
-        lastAutoSyncedDigestRef.current.get(key) === digest
-      ) {
-        return;
-      }
-
-      const runId = crypto.randomUUID();
-      const outboundSessionId = crypto.randomUUID();
-
-      const peerRun: PeerRunState = {
-        key,
-        pairingId,
-        peerId,
-        mode: 'auto',
-        outboundSessionId,
-        inboundSessionId: null,
-        localManifest,
-        allowedOutboundIds: new Set(localManifest.map((e) => e.noteId)),
-        allowedIncomingIds: null,
-        outboundRequestReceived: false,
-        outboundSendingInProgress: false,
-        inboundManifestReceived: false,
-        pendingOutgoing: new Map(),
-        pendingIncomingIds: new Set(),
-        sentCount: 0,
-        receivedCount: 0,
-        failedCount: 0,
-        unchangedCount: 0,
-        disconnected: false,
-        done: false,
-      };
-
-      const autoRun: AutoSyncRun = {
-        runId,
-        peer: peerRun,
-        timeoutId: null,
-        settled: false,
-      };
-
-      autoRun.timeoutId = setTimeout(() => {
-        if (autoRunsRef.current.get(key) === autoRun && !autoRun.settled) {
-          peerRun.failedCount++;
-          peerRun.disconnected = true;
-          evaluateAutoRunCompletion(autoRun);
-        }
-      }, SYNC_TIMEOUT_MS);
-
-      autoRunsRef.current.set(key, autoRun);
-
-      const sentOk = await sendForPairing(
-        pairingId,
-        {
-          type: 'manifest',
-          sessionId: outboundSessionId,
-          entries: localManifest,
-          wantsManifest: true,
-        },
-        peerId
-      );
-
-      if (!sentOk && autoRunsRef.current.get(key) === autoRun && !autoRun.settled) {
-        peerRun.failedCount++;
-        peerRun.disconnected = true;
-        evaluateAutoRunCompletion(autoRun);
-      }
-    },
-    [evaluateAutoRunCompletion, pruneStaleBookkeeping, sendForPairing]
-  );
+    if (
+      !isUnmountedRef.current &&
+      autoPendingResyncRef.current.has(peerRun.key) &&
+      autoSyncEnabledRef.current &&
+      peerAutoSyncRef.current.get(peerRun.key) === true
+    ) {
+      autoPendingResyncRef.current.delete(peerRun.key);
+      void startAutoSyncForPeer(peerRun.pairingId, peerRun.peerId, 'local-change');
+    }
+  }, [startAutoSyncForPeer]);
 
   useEffect(() => {
-    startAutoSyncForPeerRef.current = startAutoSyncForPeer;
-  }, [startAutoSyncForPeer]);
+    evaluateAutoRunCompletionRef.current = evaluateAutoRunCompletion;
+  }, [evaluateAutoRunCompletion]);
 
   const abandonActiveRun = useCallback(
     (message: string) => {
@@ -594,6 +689,38 @@ export function useSync(onNotesChanged: () => void) {
         if (pId === pairingId && (peerId === undefined || rPeerId === peerId)) {
           peerAutoSyncRef.current.delete(key);
           cancelAutoSyncForPeer(key);
+        }
+      }
+      if (peerId !== undefined) {
+        cancelAutoSyncForPeer(peerCompositeKey(pairingId, peerId));
+      }
+
+      // Cancel any responder sessions and pending ACKs for disconnected peer(s)
+      for (const [rKey, session] of inboundRespondersRef.current) {
+        if (
+          session.pairingId === pairingId &&
+          (peerId === undefined || session.peerId === peerId)
+        ) {
+          if (session.timeoutId !== null) {
+            clearTimeout(session.timeoutId);
+          }
+          inboundRespondersRef.current.delete(rKey);
+        }
+      }
+      for (const [sId, session] of outboundRespondersRef.current) {
+        if (
+          session.pairingId === pairingId &&
+          (peerId === undefined || session.peerId === peerId)
+        ) {
+          outboundRespondersRef.current.delete(sId);
+        }
+      }
+      for (const [transferId, entry] of pendingAcksRef.current) {
+        if (
+          entry.pairingId === pairingId &&
+          (peerId === undefined || entry.peerId === peerId)
+        ) {
+          pendingAcksRef.current.delete(transferId);
         }
       }
       if (!isUnmountedRef.current) {
@@ -804,6 +931,7 @@ export function useSync(onNotesChanged: () => void) {
                     peerId,
                     allowedNoteIds: new Set(localManifest.map((e) => e.noteId)),
                     requestHandled: false,
+                    isAutoSync: false,
                     createdAt: Date.now(),
                   });
                   await sendForPairing(
@@ -900,15 +1028,68 @@ export function useSync(onNotesChanged: () => void) {
                   }
 
                   // Passive responder path (remote peer initiated sync)
+                  if (
+                    msg.autoSync === true &&
+                    (!autoSyncEnabledRef.current || peerAutoSyncRef.current.get(key) !== true)
+                  ) {
+                    return;
+                  }
+
                   const localManifest = await buildLocalManifest(db);
+                  if (
+                    isUnmountedRef.current ||
+                    roomsRef.current.get(pairing.id) !== entry ||
+                    !desiredRoomsRef.current.has(pairing.id) ||
+                    (msg.autoSync === true &&
+                      (!autoSyncEnabledRef.current ||
+                        peerAutoSyncRef.current.get(key) !== true))
+                  ) {
+                    return;
+                  }
+
                   const toRequest = Array.from(
                     new Set(computeDiff(localManifest, msg.entries))
                   );
-                  await sendForPairing(
+
+                  const responderKey = `${key}\x00${msg.sessionId}`;
+                  let createdInboundResponder: InboundResponderSession | null = null;
+                  if (toRequest.length > 0) {
+                    const now = Date.now();
+                    const session: InboundResponderSession = {
+                      sessionId: msg.sessionId,
+                      pairingId: pairing.id,
+                      peerId,
+                      allowedNoteIds: new Set(toRequest),
+                      pendingNoteIds: new Set(toRequest),
+                      isAutoSync: msg.autoSync === true,
+                      createdAt: now,
+                      expiresAt: now + SYNC_TIMEOUT_MS,
+                      timeoutId: null,
+                    };
+                    session.timeoutId = setTimeout(() => {
+                      const current = inboundRespondersRef.current.get(responderKey);
+                      if (current === session) {
+                        inboundRespondersRef.current.delete(responderKey);
+                      }
+                    }, SYNC_TIMEOUT_MS);
+                    inboundRespondersRef.current.set(responderKey, session);
+                    createdInboundResponder = session;
+                  }
+
+                  const reqSentOk = await sendForPairing(
                     pairing.id,
                     { type: 'request', sessionId: msg.sessionId, noteIds: toRequest },
                     peerId
                   );
+                  if (!reqSentOk && createdInboundResponder) {
+                    const current = inboundRespondersRef.current.get(responderKey);
+                    if (current === createdInboundResponder) {
+                      if (current.timeoutId !== null) {
+                        clearTimeout(current.timeoutId);
+                      }
+                      inboundRespondersRef.current.delete(responderKey);
+                    }
+                  }
 
                   if (msg.wantsManifest === true) {
                     const replySessionId = crypto.randomUUID();
@@ -917,6 +1098,7 @@ export function useSync(onNotesChanged: () => void) {
                       peerId,
                       allowedNoteIds: new Set(localManifest.map((e) => e.noteId)),
                       requestHandled: false,
+                      isAutoSync: msg.autoSync === true,
                       createdAt: Date.now(),
                     });
                     await sendForPairing(
@@ -1115,31 +1297,156 @@ export function useSync(onNotesChanged: () => void) {
 
                   const activeMatch = findPeerRunForSession(
                     key,
-                    (p) => p.inboundSessionId === msg.sessionId
+                    (p) =>
+                      p.inboundSessionId === msg.sessionId &&
+                      !p.disconnected &&
+                      !p.done &&
+                      p.inboundManifestReceived &&
+                      p.allowedIncomingIds !== null
                   );
+                  const isValidActiveMatch =
+                    activeMatch !== null &&
+                    (activeMatch.kind === 'manual' ||
+                      (autoSyncEnabledRef.current &&
+                        peerAutoSyncRef.current.get(key) === true));
+
+                  const responderKey = `${key}\x00${msg.sessionId}`;
+                  let inboundResponder: InboundResponderSession | null = null;
+                  if (!isValidActiveMatch) {
+                    const candidate = inboundRespondersRef.current.get(responderKey);
+                    if (candidate) {
+                      const now = Date.now();
+                      if (candidate.expiresAt < now) {
+                        if (candidate.timeoutId !== null) {
+                          clearTimeout(candidate.timeoutId);
+                        }
+                        inboundRespondersRef.current.delete(responderKey);
+                      } else if (
+                        candidate.pairingId === pairing.id &&
+                        candidate.peerId === peerId &&
+                        (!candidate.isAutoSync ||
+                          (autoSyncEnabledRef.current &&
+                            peerAutoSyncRef.current.get(key) === true))
+                      ) {
+                        inboundResponder = candidate;
+                      }
+                    }
+                  }
+
+                  if (!isValidActiveMatch && !inboundResponder) {
+                    console.warn(
+                      'Rejecting unauthorized or inactive incoming note session from peer:',
+                      peerId,
+                      msg.sessionId
+                    );
+                    return;
+                  }
+
+                  const authorizedMatch = isValidActiveMatch ? activeMatch : null;
+                  const allowedIds = authorizedMatch
+                    ? authorizedMatch.peerRun.allowedIncomingIds!
+                    : inboundResponder!.allowedNoteIds;
+                  const pendingIds = authorizedMatch
+                    ? authorizedMatch.peerRun.pendingIncomingIds
+                    : inboundResponder!.pendingNoteIds;
+
+                  const isSessionStillAuthorized = (targetNoteId: string): boolean => {
+                    if (
+                      isUnmountedRef.current ||
+                      roomsRef.current.get(pairing.id) !== entry ||
+                      !desiredRoomsRef.current.has(pairing.id)
+                    ) {
+                      return false;
+                    }
+                    if (authorizedMatch) {
+                      if (authorizedMatch.kind === 'manual') {
+                        return (
+                          activeRunRef.current === authorizedMatch.run &&
+                          !authorizedMatch.run.settled &&
+                          !authorizedMatch.peerRun.disconnected &&
+                          !authorizedMatch.peerRun.done &&
+                          authorizedMatch.peerRun.inboundSessionId === msg.sessionId &&
+                          authorizedMatch.peerRun.allowedIncomingIds?.has(targetNoteId) === true &&
+                          authorizedMatch.peerRun.pendingIncomingIds.has(targetNoteId)
+                        );
+                      }
+                      return (
+                        autoRunsRef.current.get(key) === authorizedMatch.autoRun &&
+                        !authorizedMatch.autoRun.settled &&
+                        !authorizedMatch.peerRun.disconnected &&
+                        !authorizedMatch.peerRun.done &&
+                        autoSyncEnabledRef.current &&
+                        peerAutoSyncRef.current.get(key) === true &&
+                        authorizedMatch.peerRun.inboundSessionId === msg.sessionId &&
+                        authorizedMatch.peerRun.allowedIncomingIds?.has(targetNoteId) === true &&
+                        authorizedMatch.peerRun.pendingIncomingIds.has(targetNoteId)
+                      );
+                    }
+                    const currentResponder = inboundRespondersRef.current.get(responderKey);
+                    return (
+                      currentResponder === inboundResponder &&
+                      currentResponder.pairingId === pairing.id &&
+                      currentResponder.peerId === peerId &&
+                      currentResponder.expiresAt >= Date.now() &&
+                      (!currentResponder.isAutoSync ||
+                        (autoSyncEnabledRef.current &&
+                          peerAutoSyncRef.current.get(key) === true)) &&
+                      currentResponder.allowedNoteIds.has(targetNoteId) &&
+                      currentResponder.pendingNoteIds.has(targetNoteId)
+                    );
+                  };
 
                   try {
+                    if (
+                      msg.noteId !== undefined &&
+                      (!allowedIds.has(msg.noteId) || !pendingIds.has(msg.noteId))
+                    ) {
+                      throw new Error('Unexpected note ID not requested in this session');
+                    }
+
                     const note = await decompressNote(msg.payload);
                     if (msg.noteId !== undefined && msg.noteId !== note.id) {
                       throw new Error('Note ID mismatch');
                     }
 
-                    // If this session has an explicit inbound allowlist (e.g., selective sync),
-                    // reject any unselected or unlisted note IDs before writing to IndexedDB.
-                    if (
-                      activeMatch?.peerRun.allowedIncomingIds &&
-                      !activeMatch.peerRun.allowedIncomingIds.has(note.id)
-                    ) {
+                    // Enforce session allowlist and pending state before any DB read/write.
+                    if (!allowedIds.has(note.id) || !pendingIds.has(note.id)) {
                       throw new Error('Unexpected note ID not requested in this session');
                     }
 
+                    if (!isSessionStillAuthorized(note.id)) {
+                      console.warn(
+                        'Aborting incoming note write after session became inactive:',
+                        peerId,
+                        msg.sessionId
+                      );
+                      return;
+                    }
+
                     const existing = await db.notes.get(note.id);
+                    if (!isSessionStillAuthorized(note.id)) {
+                      console.warn(
+                        'Aborting incoming note write after session became inactive:',
+                        peerId,
+                        msg.sessionId
+                      );
+                      return;
+                    }
+
                     const incomingTime = Date.parse(note.updatedAt);
                     const existingTime = existing
                       ? Date.parse(existing.updatedAt)
                       : Number.NEGATIVE_INFINITY;
                     if (!existing || !Number.isFinite(existingTime) || incomingTime > existingTime) {
                       const hash = await computeContentHash(note.content, note.attachments);
+                      if (!isSessionStillAuthorized(note.id)) {
+                        console.warn(
+                          'Aborting incoming note write after session became inactive:',
+                          peerId,
+                          msg.sessionId
+                        );
+                        return;
+                      }
                       await db.notes.put({
                         id: note.id,
                         title: note.title,
@@ -1149,6 +1456,14 @@ export function useSync(onNotesChanged: () => void) {
                         updatedAt: note.updatedAt,
                         contentHash: hash,
                       });
+                      if (authorizedMatch) {
+                        authorizedMatch.peerRun.syncedIncomingEntries.set(note.id, {
+                          noteId: note.id,
+                          contentHash: hash,
+                          updatedAt: note.updatedAt,
+                          title: note.title,
+                        });
+                      }
                       onNotesChangedRef.current();
                     }
 
@@ -1170,10 +1485,22 @@ export function useSync(onNotesChanged: () => void) {
                       peerId
                     );
 
-                    if (activeMatch && activeMatch.peerRun.pendingIncomingIds.has(note.id)) {
-                      activeMatch.peerRun.pendingIncomingIds.delete(note.id);
-                      activeMatch.peerRun.receivedCount++;
-                      notifyRunCompletion(activeMatch);
+                    if (authorizedMatch) {
+                      if (authorizedMatch.peerRun.pendingIncomingIds.has(note.id)) {
+                        authorizedMatch.peerRun.pendingIncomingIds.delete(note.id);
+                        authorizedMatch.peerRun.receivedCount++;
+                        notifyRunCompletion(authorizedMatch);
+                      }
+                    } else if (inboundResponder) {
+                      inboundResponder.pendingNoteIds.delete(note.id);
+                      if (inboundResponder.pendingNoteIds.size === 0) {
+                        if (inboundResponder.timeoutId !== null) {
+                          clearTimeout(inboundResponder.timeoutId);
+                        }
+                        if (inboundRespondersRef.current.get(responderKey) === inboundResponder) {
+                          inboundRespondersRef.current.delete(responderKey);
+                        }
+                      }
                     }
                   } catch (err) {
                     console.warn('Failed to process incoming note payload:', err);
@@ -1201,13 +1528,27 @@ export function useSync(onNotesChanged: () => void) {
                     );
 
                     if (
-                      activeMatch &&
+                      authorizedMatch &&
                       msg.noteId &&
-                      activeMatch.peerRun.pendingIncomingIds.has(msg.noteId)
+                      authorizedMatch.peerRun.pendingIncomingIds.has(msg.noteId)
                     ) {
-                      activeMatch.peerRun.pendingIncomingIds.delete(msg.noteId);
-                      activeMatch.peerRun.failedCount++;
-                      notifyRunCompletion(activeMatch);
+                      authorizedMatch.peerRun.pendingIncomingIds.delete(msg.noteId);
+                      authorizedMatch.peerRun.failedCount++;
+                      notifyRunCompletion(authorizedMatch);
+                    } else if (
+                      inboundResponder &&
+                      msg.noteId &&
+                      inboundResponder.pendingNoteIds.has(msg.noteId)
+                    ) {
+                      inboundResponder.pendingNoteIds.delete(msg.noteId);
+                      if (inboundResponder.pendingNoteIds.size === 0) {
+                        if (inboundResponder.timeoutId !== null) {
+                          clearTimeout(inboundResponder.timeoutId);
+                        }
+                        if (inboundRespondersRef.current.get(responderKey) === inboundResponder) {
+                          inboundRespondersRef.current.delete(responderKey);
+                        }
+                      }
                     }
                   }
                   return;
@@ -1270,6 +1611,19 @@ export function useSync(onNotesChanged: () => void) {
                     activeMatch.peerRun.pendingIncomingIds.delete(msg.noteId);
                     activeMatch.peerRun.failedCount++;
                     notifyRunCompletion(activeMatch);
+                    return;
+                  }
+
+                  const responderKey = `${key}\x00${msg.sessionId}`;
+                  const inboundResponder = inboundRespondersRef.current.get(responderKey);
+                  if (inboundResponder && inboundResponder.pendingNoteIds.has(msg.noteId)) {
+                    inboundResponder.pendingNoteIds.delete(msg.noteId);
+                    if (inboundResponder.pendingNoteIds.size === 0) {
+                      if (inboundResponder.timeoutId !== null) {
+                        clearTimeout(inboundResponder.timeoutId);
+                      }
+                      inboundRespondersRef.current.delete(responderKey);
+                    }
                   }
                 }
               } catch (e) {
@@ -1331,6 +1685,12 @@ export function useSync(onNotesChanged: () => void) {
     const desiredSet = desiredRoomsRef.current;
     const autoDebounceMap = autoDebounceTimersRef.current;
     const autoRunsMap = autoRunsRef.current;
+    const startingAutoSet = startingAutoRunsRef.current;
+    const autoPendingSet = autoPendingResyncRef.current;
+    const lastAutoDigestMap = lastAutoSyncedDigestRef.current;
+    const inboundRespondersMap = inboundRespondersRef.current;
+    const outboundRespondersMap = outboundRespondersRef.current;
+    const pendingAcksMap = pendingAcksRef.current;
 
     void (async () => {
       let storedAutoSync = false;
@@ -1369,6 +1729,17 @@ export function useSync(onNotesChanged: () => void) {
         }
       }
       autoRunsMap.clear();
+      startingAutoSet.clear();
+      autoPendingSet.clear();
+      lastAutoDigestMap.clear();
+      for (const session of inboundRespondersMap.values()) {
+        if (session.timeoutId !== null) {
+          clearTimeout(session.timeoutId);
+        }
+      }
+      inboundRespondersMap.clear();
+      outboundRespondersMap.clear();
+      pendingAcksMap.clear();
       desiredSet.clear();
       pendingMap.clear();
       const entries = Array.from(roomsMap.values());
@@ -1399,13 +1770,28 @@ export function useSync(onNotesChanged: () => void) {
       }
 
       if (!enabled) {
-        for (const key of Array.from(autoDebounceTimersRef.current.keys())) {
-          cancelAutoSyncForPeer(key);
+        const keysToCancel = new Set<string>([
+          ...autoDebounceTimersRef.current.keys(),
+          ...autoRunsRef.current.keys(),
+          ...lastAutoSyncedDigestRef.current.keys(),
+          ...autoPendingResyncRef.current,
+          ...connectedPeersRef.current.map((p) => peerCompositeKey(p.pairingId, p.peerId)),
+        ]);
+        for (const session of inboundRespondersRef.current.values()) {
+          if (session.isAutoSync) {
+            keysToCancel.add(peerCompositeKey(session.pairingId, session.peerId));
+          }
         }
-        for (const key of Array.from(autoRunsRef.current.keys())) {
+        for (const session of outboundRespondersRef.current.values()) {
+          if (session.isAutoSync) {
+            keysToCancel.add(peerCompositeKey(session.pairingId, session.peerId));
+          }
+        }
+        for (const key of keysToCancel) {
           cancelAutoSyncForPeer(key);
         }
         autoPendingResyncRef.current.clear();
+        lastAutoSyncedDigestRef.current.clear();
         return;
       }
 
@@ -1578,6 +1964,7 @@ export function useSync(onNotesChanged: () => void) {
             inboundManifestReceived: false,
             pendingOutgoing: new Map(),
             pendingIncomingIds: new Set(),
+            syncedIncomingEntries: new Map(),
             sentCount: 0,
             receivedCount: 0,
             failedCount: 0,
@@ -1739,6 +2126,7 @@ export function useSync(onNotesChanged: () => void) {
         inboundManifestReceived: true,
         pendingOutgoing: new Map(),
         pendingIncomingIds: new Set(toRequest),
+        syncedIncomingEntries: new Map(),
         sentCount: 0,
         receivedCount: 0,
         failedCount: 0,

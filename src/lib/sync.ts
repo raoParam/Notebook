@@ -35,6 +35,7 @@ export type SyncMessage =
       wantsManifest?: boolean;
       inReplyTo?: string;
       previewOnly?: boolean;
+      autoSync?: boolean;
     }
   | {
       type: 'manifest-request';
@@ -225,6 +226,9 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
       if (data.previewOnly !== undefined && typeof data.previewOnly !== 'boolean') {
         return null;
       }
+      if (data.autoSync !== undefined && typeof data.autoSync !== 'boolean') {
+        return null;
+      }
       const entries: ManifestEntry[] = [];
       for (const item of data.entries) {
         if (!isPlainObject(item)) return null;
@@ -253,6 +257,7 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         ...(data.wantsManifest !== undefined ? { wantsManifest: data.wantsManifest } : {}),
         ...(data.inReplyTo !== undefined ? { inReplyTo: data.inReplyTo } : {}),
         ...(data.previewOnly !== undefined ? { previewOnly: data.previewOnly } : {}),
+        ...(data.autoSync !== undefined ? { autoSync: data.autoSync } : {}),
       };
     }
 

@@ -1295,3 +1295,746 @@ describe('useSync Batch 3: auto-sync, manual preview & selective sync', () => {
     expect(mountA.api().manualPreview.stage).toBe('disconnected');
   });
 });
+
+describe('useSync Batch 3.1: auto-sync race & incoming transfer authorization', () => {
+  const cleanups: Array<() => Promise<void>> = [];
+
+  async function flushAsyncWithFakeTimers(rounds = 15) {
+    for (let i = 0; i < rounds; i++) {
+      await act(async () => {
+        await new Promise<void>((res) => setImmediate(res));
+      });
+    }
+  }
+
+  function enableSyncFakeTimers() {
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'],
+    });
+  }
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    resetNetwork();
+    mockIceServersImpl = async () => [{ urls: 'stun:stun.l.google.com:19302' }];
+    fallbackDb = createMockDb();
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    while (cleanups.length > 0) {
+      const fn = cleanups.pop();
+      if (fn) await fn();
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('transfers local edit made while auto-sync is active and debounce timer fires during the run', async () => {
+    enableSyncFakeTimers();
+
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA1 = await makeNote('a1', 'A1', 'Initial A1', '2026-01-02T00:00:00.000Z');
+    const noteB1 = await makeNote('b1', 'B1', 'Initial B1', '2026-01-02T00:00:00.000Z');
+
+    const dbA = createMockDb([noteA1], [pairing]);
+    const dbB = createMockDb([noteB1], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    // Initial mutually enabled handshake
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbA.notesMap.has('b1')).toBe(true);
+    expect(dbB.notesMap.has('a1')).toBe(true);
+
+    // Trigger Run 1 via edit e1, but hold ACKs returning to A so Run 1 stays active
+    const heldAcksToA: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'ack') {
+        const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+        heldAcksToA.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    const noteA2 = await makeNote('a2', 'A2', 'Run 1 note', '2026-01-03T00:00:00.000Z');
+    dbA.notesMap.set('a2', noteA2);
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTO_SYNC_DEBOUNCE_MS + 10);
+    });
+    await flushAsyncWithFakeTimers();
+
+    // Run 1 is active waiting for ACK of a2
+    expect(heldAcksToA).toHaveLength(1);
+    expect(dbB.notesMap.has('a2')).toBe(true);
+
+    // Edit a3 WHILE Run 1 is active, and advance past debounce so debounce fires during active Run 1
+    const noteA3 = await makeNote('a3', 'A3', 'Edited while active', '2026-01-04T00:00:00.000Z');
+    dbA.notesMap.set('a3', noteA3);
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTO_SYNC_DEBOUNCE_MS + 10);
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.has('a3')).toBe(false);
+
+    // Release Run 1 ACK -> Run 1 settles and MUST trigger follow-up Run 2 transferring a3
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      heldAcksToA.shift()!();
+    });
+    await flushAsyncWithFakeTimers(20);
+
+    expect(dbB.notesMap.get('a3')?.content).toBe('Edited while active');
+
+    // Verify no infinite loop or repeated transfers after settling
+    const notesSentCount = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushAsyncWithFakeTimers();
+    // Calling notifyLocalNoteChange without actual changes must not trigger extra transfers
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+      await vi.advanceTimersByTimeAsync(AUTO_SYNC_DEBOUNCE_MS + 100);
+    });
+    await flushAsyncWithFakeTimers();
+
+    const notesSentAfterSettle = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+    expect(notesSentAfterSettle).toBe(notesSentCount);
+  });
+
+  it('transfers local edit made while auto-sync is active even when debounce timer is still pending at run completion', async () => {
+    enableSyncFakeTimers();
+
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA1 = await makeNote('a1', 'A1', 'Initial A1', '2026-01-02T00:00:00.000Z');
+    const dbA = createMockDb([noteA1], [pairing]);
+    const dbB = createMockDb([], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncWithFakeTimers();
+
+    // Hold ACK for Run 1
+    const heldAcksToA: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'ack') {
+        const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+        heldAcksToA.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    const noteA2 = await makeNote('a2', 'A2', 'Run 1 body', '2026-01-03T00:00:00.000Z');
+    dbA.notesMap.set('a2', noteA2);
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTO_SYNC_DEBOUNCE_MS + 10);
+    });
+    await flushAsyncWithFakeTimers();
+    expect(heldAcksToA).toHaveLength(1);
+
+    // Make edit a3 while Run 1 is active, and DO NOT let debounce expire before Run 1 finishes
+    const noteA3 = await makeNote('a3', 'A3', 'Edited before debounce', '2026-01-04T00:00:00.000Z');
+    dbA.notesMap.set('a3', noteA3);
+    await act(async () => {
+      mountA.api().notifyLocalNoteChange();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+
+    // Complete Run 1 while debounce timer for a3 is still pending
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      heldAcksToA.shift()!();
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.has('a3')).toBe(false);
+
+    // Advance past debounce -> follow-up run MUST NOT skip a3 and must transfer it
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(AUTO_SYNC_DEBOUNCE_MS + 50);
+    });
+    await flushAsyncWithFakeTimers(20);
+    expect(dbB.notesMap.get('a3')?.content).toBe('Edited before debounce');
+
+    // No repeated transfers or infinite loop
+    const noteCountBefore = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await flushAsyncWithFakeTimers();
+    const noteCountAfter = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'note'
+    ).length;
+    expect(noteCountAfter).toBe(noteCountBefore);
+  });
+
+  it('rejects unsolicited notes, unknown sessions, and wrong-peer/wrong-pairing sessions before DB write', async () => {
+    const pairing1: Pairing = { id: 'room11111111', label: 'Pair 1', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const pairing2: Pairing = { id: 'room22222222', label: 'Pair 2', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const peerNote = await makeNote('legit-1', 'Legit', 'Legit content', '2026-01-02T00:00:00.000Z');
+
+    const dbA = createMockDb([], [pairing1, pairing2]);
+    const dbB = createMockDb([peerNote], [pairing1]);
+    const dbC = createMockDb([], [pairing2]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    const mountC = await mountSyncHook('device-C', dbC);
+    cleanups.push(mountA.unmount, mountB.unmount, mountC.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB, 'device-C': dbC });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const roomA1 = network.rooms.find((r) => r.deviceId === 'device-A' && r.roomId === pairing1.id)!;
+    const roomA2 = network.rooms.find((r) => r.deviceId === 'device-A' && r.roomId === pairing2.id)!;
+
+    // 1. Unsolicited note with no active session & unknown sessionId
+    const rogue1 = await makeNote('rogue-1', 'Rogue 1', 'Sneaky', '2026-01-05T00:00:00.000Z');
+    const compressedRogue1 = await compressNote(rogue1);
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA1.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'unknown-session-123',
+            transferId: 'tx-rogue-1',
+            noteId: 'rogue-1',
+            payload: Array.from(compressedRogue1),
+          },
+          { peerId: 'device-B' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.has('rogue-1')).toBe(false);
+
+    // 2. Start an active manual selective sync session on pairing1 with device-B for 'legit-1',
+    // holding the legitimate note so the session stays active.
+    await act(async () => {
+      void mountA.api().requestPeerManifest(pairing1.id);
+    });
+    await flushAsyncTicks(15);
+    const preview = mountA.api().manualPreview;
+    expect(preview.stage).toBe('ready');
+    const activeSessionId = preview.stage === 'ready' ? preview.peerManifestSessionId : '';
+
+    const heldLegit: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'note') {
+        heldLegit.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA1.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    await act(async () => {
+      void mountA.api().syncSelectedWithPeer(pairing1.id, ['legit-1']);
+    });
+    await flushAsyncTicks(15);
+
+    // Wrong peerId in pairing1 trying to inject legit-1 using activeSessionId
+    const forgedNote = await makeNote('legit-1', 'Forged', 'Evil overwrite', '2026-01-09T00:00:00.000Z');
+    const compressedForged = await compressNote(forgedNote);
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA1.onMessage?.(
+          {
+            type: 'note',
+            sessionId: activeSessionId,
+            transferId: 'tx-wrong-peer',
+            noteId: 'legit-1',
+            payload: Array.from(compressedForged),
+          },
+          { peerId: 'evil-peer' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.has('legit-1')).toBe(false);
+
+    // Wrong pairing (pairing2) trying to inject legit-1 using activeSessionId (even from device-C or spoofed device-B)
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA2.onMessage?.(
+          {
+            type: 'note',
+            sessionId: activeSessionId,
+            transferId: 'tx-wrong-pairing',
+            noteId: 'legit-1',
+            payload: Array.from(compressedForged),
+          },
+          { peerId: 'device-B' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.has('legit-1')).toBe(false);
+
+    // Deliver the legitimate note -> accepted
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      for (const deliver of heldLegit) deliver();
+    });
+    await flushAsyncTicks(15);
+    expect(dbA.notesMap.get('legit-1')?.content).toBe('Legit content');
+
+    // Completed session: late note with a new transferId on the same sessionId must be rejected
+    const lateNote = await makeNote('legit-1', 'Late', 'Late overwrite', '2026-01-10T00:00:00.000Z');
+    const compressedLate = await compressNote(lateNote);
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA1.onMessage?.(
+          {
+            type: 'note',
+            sessionId: activeSessionId,
+            transferId: 'tx-late-after-complete',
+            noteId: 'legit-1',
+            payload: Array.from(compressedLate),
+          },
+          { peerId: 'device-B' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+    expect(dbA.notesMap.get('legit-1')?.content).toBe('Legit content');
+
+    // Duplicate-transfer ACK cache is preserved: re-delivering same (sessionId, transferId) re-sends cached ACK without modifying DB
+    const legitWire = network.sentMessages.find(
+      (m) => (m.data as { type?: string; noteId?: string }).type === 'note' &&
+        (m.data as { noteId?: string }).noteId === 'legit-1'
+    )!.data as { sessionId: string; transferId: string; noteId: string; payload: number[] };
+    const acksBeforeDup = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'ack'
+    ).length;
+
+    await act(async () => {
+      dbContext.run(dbA, () => {
+        currentDeviceId = 'device-A';
+        roomA1.onMessage?.(structuredClone(legitWire), { peerId: 'device-B' });
+      });
+    });
+    await flushAsyncTicks();
+    const acksAfterDup = network.sentMessages.filter(
+      (m) => (m.data as { type?: string }).type === 'ack'
+    ).length;
+    expect(acksAfterDup).toBe(acksBeforeDup + 1);
+    expect(dbA.notesMap.get('legit-1')?.content).toBe('Legit content');
+
+    warnSpy.mockRestore();
+  });
+
+  it('rejects notes from expired or cancelled manual sessions', async () => {
+    vi.useFakeTimers();
+
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteB = await makeNote('b1', 'Note B', 'B body', '2026-01-02T00:00:00.000Z');
+    const dbA = createMockDb([], [pairing]);
+    const dbB = createMockDb([noteB], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Hold note messages to device-A
+    const heldNotes: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'note') {
+        const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+        heldNotes.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    await act(async () => {
+      void mountA.api().triggerSync();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(heldNotes).toHaveLength(1);
+
+    // Expire the session
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SYNC_TIMEOUT_MS + 10);
+    });
+    expect(mountA.api().syncStatus.stage).toBe('error');
+
+    // Late note arrives after expiry -> must NOT write to IndexedDB
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      heldNotes.shift()!();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(dbA.notesMap.has('b1')).toBe(false);
+
+    warnSpy.mockRestore();
+  });
+
+  it('passive responder accepts legitimately requested notes and rejects unrequested or expired ones', async () => {
+    enableSyncFakeTimers();
+
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteReq = await makeNote('req-1', 'Requested', 'Requested body', '2026-01-02T00:00:00.000Z');
+    const noteExtra = await makeNote('extra-1', 'Unrequested', 'Unrequested body', '2026-01-02T00:00:00.000Z');
+    const dbB = createMockDb([], [pairing]);
+
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountB.unmount);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const roomB = network.rooms.find((r) => r.deviceId === 'device-B')!;
+    await act(async () => {
+      roomB.onPeerJoin?.('device-A');
+    });
+
+    // Device A initiates sync with Device B as passive responder, advertising only 'req-1'
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'manifest',
+            sessionId: 'passive-sess-1',
+            entries: [
+              {
+                noteId: noteReq.id,
+                contentHash: noteReq.contentHash,
+                updatedAt: noteReq.updatedAt,
+                title: noteReq.title,
+              },
+            ],
+            wantsManifest: false,
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+
+    // Device B should have requested 'req-1'
+    const reqSent = network.sentMessages.find(
+      (m) => (m.data as { type?: string; sessionId?: string }).type === 'request' &&
+        (m.data as { sessionId?: string }).sessionId === 'passive-sess-1'
+    );
+    expect((reqSent?.data as { noteIds: string[] })?.noteIds).toEqual(['req-1']);
+
+    // Unrequested 'extra-1' pushed on passive-sess-1 -> MUST be rejected
+    const compressedExtra = await compressNote(noteExtra);
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'passive-sess-1',
+            transferId: 'tx-extra',
+            noteId: 'extra-1',
+            payload: Array.from(compressedExtra),
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.has('extra-1')).toBe(false);
+
+    // Legitimately requested 'req-1' arrives -> MUST be accepted
+    const compressedReq = await compressNote(noteReq);
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'passive-sess-1',
+            transferId: 'tx-req-1',
+            noteId: 'req-1',
+            payload: Array.from(compressedReq),
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.get('req-1')?.content).toBe('Requested body');
+
+    // Session is now completed -> late rewrite on same sessionId with new transferId must be rejected
+    const noteReqUpdated = await makeNote('req-1', 'Late', 'Late overwrite', '2026-01-05T00:00:00.000Z');
+    const compressedReqUpdated = await compressNote(noteReqUpdated);
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'passive-sess-1',
+            transferId: 'tx-req-1-late',
+            noteId: 'req-1',
+            payload: Array.from(compressedReqUpdated),
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.get('req-1')?.content).toBe('Requested body');
+
+    // Expired passive responder session -> late note must be rejected
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'manifest',
+            sessionId: 'passive-sess-expiring',
+            entries: [
+              {
+                noteId: noteExtra.id,
+                contentHash: noteExtra.contentHash,
+                updatedAt: noteExtra.updatedAt,
+                title: noteExtra.title,
+              },
+            ],
+            wantsManifest: false,
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SYNC_TIMEOUT_MS + 10);
+    });
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'passive-sess-expiring',
+            transferId: 'tx-expired-passive',
+            noteId: 'extra-1',
+            payload: Array.from(compressedExtra),
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncWithFakeTimers();
+    expect(dbB.notesMap.has('extra-1')).toBe(false);
+
+    warnSpy.mockRestore();
+  });
+
+  it('disabling auto-sync cancels authorization for outstanding auto-sync passive responder transfers', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA = await makeNote('auto-resp-1', 'Auto Resp', 'Auto body', '2026-01-02T00:00:00.000Z');
+    const dbB = createMockDb([], [pairing]);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountB.unmount);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const roomB = network.rooms.find((r) => r.deviceId === 'device-B')!;
+
+    await act(async () => {
+      roomB.onPeerJoin?.('device-A');
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.({ type: 'auto-sync-pref', enabled: true }, { peerId: 'device-A' });
+      });
+    });
+    await flushAsyncTicks();
+
+    // Simulate peer A initiating auto-sync manifest to B as passive responder
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'manifest',
+            sessionId: 'auto-passive-sess',
+            entries: [
+              {
+                noteId: noteA.id,
+                contentHash: noteA.contentHash,
+                updatedAt: noteA.updatedAt,
+                title: noteA.title,
+              },
+            ],
+            wantsManifest: false,
+            autoSync: true,
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+
+    // Disable auto-sync on B before A delivers the note
+    await act(async () => {
+      mountB.api().setAutoSyncEnabled(false);
+    });
+    await flushAsyncTicks();
+
+    const compressed = await compressNote(noteA);
+    await act(async () => {
+      dbContext.run(dbB, () => {
+        currentDeviceId = 'device-B';
+        roomB.onMessage?.(
+          {
+            type: 'note',
+            sessionId: 'auto-passive-sess',
+            transferId: 'tx-auto-passive-late',
+            noteId: noteA.id,
+            payload: Array.from(compressed),
+          },
+          { peerId: 'device-A' }
+        );
+      });
+    });
+    await flushAsyncTicks();
+
+    expect(dbB.notesMap.has('auto-resp-1')).toBe(false);
+    warnSpy.mockRestore();
+  });
+
+  it('disabling auto-sync cancels authorization for outstanding auto-sync transfers (initiator and responder)', async () => {
+    const pairing: Pairing = { id: 'room12345678', label: 'Pair', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const noteA = await makeNote('a1', 'Note A', 'Body A', '2026-01-02T00:00:00.000Z');
+    const noteB = await makeNote('b1', 'Note B', 'Body B', '2026-01-02T00:00:00.000Z');
+
+    const dbA = createMockDb([noteA], [pairing]);
+    const dbB = createMockDb([noteB], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // Hold all note transfers in both directions during initial auto-sync handshake
+    const heldNotes: Array<{ to: string; deliver: () => void }> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (msg.type === 'note' && wire.toPeerId) {
+        const targetRoom = network.rooms.find((r) => r.deviceId === wire.toPeerId)!;
+        const targetDb = wire.toPeerId === 'device-A' ? dbA : dbB;
+        heldNotes.push({
+          to: wire.toPeerId,
+          deliver: () => {
+            dbContext.run(targetDb, () => {
+              currentDeviceId = wire.toPeerId!;
+              targetRoom.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+            });
+          },
+        });
+        return true;
+      }
+      return false;
+    };
+
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(true);
+      mountB.api().setAutoSyncEnabled(true);
+    });
+    await flushAsyncTicks(20);
+    expect(heldNotes.length).toBeGreaterThanOrEqual(2);
+
+    // Disable auto-sync on Device A while note transfers are still in flight
+    await act(async () => {
+      mountA.api().setAutoSyncEnabled(false);
+    });
+    await flushAsyncTicks();
+
+    // Deliver all held auto-sync note messages -> both A (disabled) and B (peer disabled) must reject late transfers
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      for (const item of heldNotes) item.deliver();
+    });
+    await flushAsyncTicks(15);
+
+    expect(dbA.notesMap.has('b1')).toBe(false);
+    expect(dbB.notesMap.has('a1')).toBe(false);
+
+    // Manual sync must STILL work cleanly when auto-sync is disabled
+    await act(async () => {
+      void mountA.api().triggerSync();
+    });
+    await flushAsyncTicks(20);
+    expect(dbA.notesMap.has('b1')).toBe(true);
+    expect(dbB.notesMap.has('a1')).toBe(true);
+
+    warnSpy.mockRestore();
+  });
+});
