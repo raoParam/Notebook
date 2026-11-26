@@ -37,6 +37,7 @@ export default function NotebookPage() {
     setAutoSyncEnabled,
     peerAutoSync,
     notifyLocalNoteChange,
+    propagateDeletion,
     manualPreview,
     requestPeerManifest,
     syncAllWithPeer,
@@ -64,9 +65,12 @@ export default function NotebookPage() {
       const note = notes.find((n) => n.id === id);
       const title = note?.title.trim() || 'Untitled';
       if (!confirm(`Delete "${title}"?`)) return;
-      await deleteNote(id);
+      const tombstone = await deleteNote(id);
+      if (tombstone) {
+        await propagateDeletion(tombstone);
+      }
     },
-    [notes, deleteNote]
+    [notes, deleteNote, propagateDeletion]
   );
 
   const handleSelectNote = useCallback(

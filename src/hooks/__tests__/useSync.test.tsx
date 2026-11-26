@@ -3,9 +3,14 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import React, { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Note, Pairing } from '@/lib/db';
+import type { Note, Pairing, Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { compressNote } from '@/lib/sync';
+import {
+  applyRemoteTombstone,
+  deleteNoteWithTombstone,
+  persistIncomingNote,
+} from '@/lib/tombstones';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -14,7 +19,9 @@ import { compressNote } from '@/lib/sync';
 interface MockDeviceDb {
   notesMap: Map<string, Note>;
   pairingsMap: Map<string, Pairing>;
+  tombstonesMap: Map<string, Tombstone>;
   failNextPutNoteId: string | null;
+  failNextPutTombstone: boolean;
   notes: {
     toArray: () => Promise<Note[]>;
     get: (id: string) => Promise<Note | undefined>;
@@ -26,15 +33,25 @@ interface MockDeviceDb {
     put: (pairing: Pairing) => Promise<string>;
     delete: (id: string) => Promise<void>;
   };
+  tombstones: {
+    get: (noteId: string) => Promise<Tombstone | undefined>;
+    put: (tombstone: Tombstone) => Promise<string>;
+    delete: (noteId: string) => Promise<void>;
+  };
+  transaction: (...args: unknown[]) => Promise<unknown>;
 }
 
 function createMockDb(initialNotes: Note[] = [], initialPairings: Pairing[] = []): MockDeviceDb {
   const notesMap = new Map(initialNotes.map((n) => [n.id, n]));
   const pairingsMap = new Map(initialPairings.map((p) => [p.id, p]));
+  const tombstonesMap = new Map<string, Tombstone>();
+  let transactionTail: Promise<void> = Promise.resolve();
   const mock: MockDeviceDb = {
     notesMap,
     pairingsMap,
+    tombstonesMap,
     failNextPutNoteId: null,
+    failNextPutTombstone: false,
     notes: {
       toArray: async () => Array.from(notesMap.values()),
       get: async (id: string) => notesMap.get(id),
@@ -60,6 +77,34 @@ function createMockDb(initialNotes: Note[] = [], initialPairings: Pairing[] = []
         pairingsMap.delete(id);
       },
     },
+    tombstones: {
+      get: async (noteId: string) => tombstonesMap.get(noteId),
+      put: async (tombstone: Tombstone) => {
+        if (mock.failNextPutTombstone) {
+          mock.failNextPutTombstone = false;
+          throw new Error('Simulated IndexedDB tombstone write error');
+        }
+        for (const existing of tombstonesMap.values()) {
+          if (
+            existing.deletionId === tombstone.deletionId &&
+            existing.noteId !== tombstone.noteId
+          ) {
+            throw new Error('Duplicate tombstone deletion ID');
+          }
+        }
+        tombstonesMap.set(tombstone.noteId, tombstone);
+        return tombstone.noteId;
+      },
+      delete: async (noteId: string) => {
+        tombstonesMap.delete(noteId);
+      },
+    },
+    transaction: async (...args: unknown[]) => {
+      const callback = args[args.length - 1] as () => Promise<unknown>;
+      const run = transactionTail.then(callback);
+      transactionTail = run.then(() => undefined, () => undefined);
+      return run;
+    },
   };
   return mock;
 }
@@ -82,6 +127,12 @@ vi.mock('@/lib/db', () => ({
       put: (p: Pairing) => getCurrentDb().pairings.put(p),
       delete: (id: string) => getCurrentDb().pairings.delete(id),
     },
+    tombstones: {
+      get: (noteId: string) => getCurrentDb().tombstones.get(noteId),
+      put: (tombstone: Tombstone) => getCurrentDb().tombstones.put(tombstone),
+      delete: (noteId: string) => getCurrentDb().tombstones.delete(noteId),
+    },
+    transaction: (...args: unknown[]) => getCurrentDb().transaction(...args),
   },
 }));
 
@@ -339,6 +390,7 @@ async function mountSyncHook(deviceId: string, deviceDb: MockDeviceDb): Promise<
       triggerSync: wrapAction(latestApi.triggerSync),
       setAutoSyncEnabled: wrapAction(latestApi.setAutoSyncEnabled),
       notifyLocalNoteChange: wrapAction(latestApi.notifyLocalNoteChange),
+      propagateDeletion: wrapAction(latestApi.propagateDeletion),
       requestPeerManifest: wrapAction(latestApi.requestPeerManifest),
       syncAllWithPeer: wrapAction(latestApi.syncAllWithPeer),
       syncSelectedWithPeer: wrapAction(latestApi.syncSelectedWithPeer),
@@ -1363,6 +1415,311 @@ describe('useSync Batch 3.1: auto-sync race & incoming transfer authorization', 
           dbContext.run(dbA, () => {
             currentDeviceId = 'device-A';
             roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+
+        describe('useSync deletion tombstones', () => {
+          const cleanups: Array<() => Promise<void>> = [];
+          const pairing: Pairing = {
+            id: 'room-deletion-01',
+            label: 'Paired device',
+            pairedAt: '2026-01-01T00:00:00.000Z',
+          };
+
+          beforeEach(() => {
+            window.localStorage.clear();
+            resetNetwork();
+            fallbackDb = createMockDb();
+          });
+
+          afterEach(async () => {
+            vi.useRealTimers();
+            while (cleanups.length > 0) {
+              await cleanups.pop()!();
+            }
+            vi.restoreAllMocks();
+          });
+
+          it('deletes locally and atomically persists a local tombstone', async () => {
+            const note = await makeNote('delete-local', 'Local', 'Body', '2026-01-02T00:00:00.000Z');
+            const deviceDb = createMockDb([note]);
+            const tombstone = await dbContext.run(deviceDb, () =>
+              deleteNoteWithTombstone(note.id)
+            );
+
+            expect(tombstone).toMatchObject({
+              noteId: note.id,
+              scope: 'local',
+              deliveryFailures: 0,
+            });
+            expect(tombstone?.deletionId).toBeTruthy();
+            expect(Date.parse(tombstone!.deletedAt)).not.toBeNaN();
+            expect(deviceDb.notesMap.has(note.id)).toBe(false);
+            expect(deviceDb.tombstonesMap.get(note.id)).toEqual(tombstone);
+          });
+
+          it('propagates deletions to connected paired peers and leaves offline copies untouched', async () => {
+            const note = await makeNote('delete-online', 'Online', 'Body', '2026-01-02T00:00:00.000Z');
+            const dbA = createMockDb([note], [pairing]);
+            const dbB = createMockDb([note], [pairing]);
+            const mountA = await mountSyncHook('device-A', dbA);
+            const mountB = await mountSyncHook('device-B', dbB);
+            cleanups.push(mountA.unmount, mountB.unmount);
+            setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+            const tombstone = await dbContext.run(dbA, () => deleteNoteWithTombstone(note.id));
+            await act(async () => {
+              await dbContext.run(dbA, () => mountA.api().propagateDeletion(tombstone!));
+            });
+            await flushAsyncTicks();
+
+            expect(dbA.tombstonesMap.get(note.id)?.scope).toBe('propagated');
+            expect(dbB.tombstonesMap.get(note.id)?.scope).toBe('propagated');
+            expect(dbB.notesMap.has(note.id)).toBe(false);
+            expect(network.sentMessages.some((message) =>
+              (message.data as { type?: string }).type === 'tombstone'
+            )).toBe(true);
+
+            const offlinePairing = { ...pairing, id: 'room-offline-01' };
+            const offlineSenderDb = createMockDb([note], [offlinePairing]);
+            const offlinePeerDb = createMockDb([note], [offlinePairing]);
+            const offlineSender = await mountSyncHook('device-offline-sender', offlineSenderDb);
+            cleanups.push(offlineSender.unmount);
+            const offlineTombstone = await dbContext.run(offlineSenderDb, () =>
+              deleteNoteWithTombstone(note.id)
+            );
+            await act(async () => {
+              await dbContext.run(offlineSenderDb, () =>
+                offlineSender.api().propagateDeletion(offlineTombstone!)
+              );
+            });
+            expect(offlineSenderDb.notesMap.has(note.id)).toBe(false);
+            expect(offlinePeerDb.notesMap.has(note.id)).toBe(true);
+            expect(dbB.notesMap.has(note.id)).toBe(false);
+            expect(network.sentMessages.filter((message) =>
+              (message.data as { type?: string }).type === 'tombstone'
+            )).toHaveLength(1);
+
+            expect(offlinePeerDb.tombstonesMap.has(note.id)).toBe(false);
+          });
+
+          it('records delivery failures and never acknowledges an unpersisted remote deletion', async () => {
+            const note = await makeNote(
+              'failed-deletion-write',
+              'Failed write',
+              'Body',
+              '2026-01-02T00:00:00.000Z'
+            );
+            const dbA = createMockDb([note], [pairing]);
+            const dbB = createMockDb([note], [pairing]);
+            dbB.failNextPutTombstone = true;
+            const mountA = await mountSyncHook('device-A', dbA);
+            const mountB = await mountSyncHook('device-B', dbB);
+            cleanups.push(mountA.unmount, mountB.unmount);
+            setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+            vi.useFakeTimers();
+
+            const tombstone = await dbContext.run(dbA, () => deleteNoteWithTombstone(note.id));
+            await act(async () => {
+              await dbContext.run(dbA, () => mountA.api().propagateDeletion(tombstone!));
+              for (let i = 0; i < 10; i++) await Promise.resolve();
+            });
+
+            expect(dbB.notesMap.has(note.id)).toBe(true);
+            expect(dbB.tombstonesMap.has(note.id)).toBe(false);
+            expect(network.sentMessages.some((message) =>
+              (message.data as { type?: string }).type === 'tombstone-ack'
+            )).toBe(false);
+
+            await act(async () => {
+              await vi.advanceTimersByTimeAsync(SYNC_TIMEOUT_MS + 1);
+            });
+            expect(dbA.tombstonesMap.get(note.id)).toMatchObject({
+              scope: 'local',
+              deliveryFailures: 1,
+            });
+            warn.mockRestore();
+          });
+
+          it('handles duplicate and out-of-order tombstones without deleting newer notes', async () => {
+            const oldNote = await makeNote(
+              'old-by-delete',
+              'Old',
+              'Body',
+              '2026-01-02T00:00:00.000Z'
+            );
+            const newerNote = await makeNote(
+              'newer-than-delete',
+              'Newer',
+              'Body',
+              '2026-05-01T00:00:00.000Z'
+            );
+            const deviceDb = createMockDb([oldNote, newerNote], [pairing]);
+            const mount = await mountSyncHook('device-B', deviceDb);
+            cleanups.push(mount.unmount);
+            const room = network.rooms.find((entry) => entry.deviceId === 'device-B')!;
+
+            await act(async () => {
+              room.onPeerJoin?.('device-A');
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: oldNote.id,
+                  deletedAt: '2026-04-01T00:00:00.000Z',
+                  deletionId: 'delete-newer',
+                },
+                { peerId: 'device-A' }
+              );
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: oldNote.id,
+                  deletedAt: '2026-04-01T00:00:00.000Z',
+                  deletionId: 'delete-newer',
+                },
+                { peerId: 'device-A' }
+              );
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: oldNote.id,
+                  deletedAt: '2026-03-01T00:00:00.000Z',
+                  deletionId: 'delete-older',
+                },
+                { peerId: 'device-A' }
+              );
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: newerNote.id,
+                  deletedAt: '2026-04-01T00:00:00.000Z',
+                  deletionId: 'delete-old-note',
+                },
+                { peerId: 'device-A' }
+              );
+            });
+            await flushAsyncTicks();
+
+            expect(deviceDb.notesMap.has(oldNote.id)).toBe(false);
+            expect(deviceDb.tombstonesMap.get(oldNote.id)).toMatchObject({
+              deletionId: 'delete-newer',
+              deletedAt: '2026-04-01T00:00:00.000Z',
+              scope: 'propagated',
+            });
+            expect(deviceDb.notesMap.has(newerNote.id)).toBe(true);
+            expect(deviceDb.tombstonesMap.get(newerNote.id)?.scope).toBe('propagated');
+          });
+
+          it('rejects malformed and unpaired deletion messages', async () => {
+            const note = await makeNote('deletion-auth', 'Auth', 'Body', '2026-01-02T00:00:00.000Z');
+            const deviceDb = createMockDb([note], [pairing]);
+            const mount = await mountSyncHook('device-B', deviceDb);
+            cleanups.push(mount.unmount);
+            const room = network.rooms.find((entry) => entry.deviceId === 'device-B')!;
+            const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            await act(async () => {
+              room.onPeerJoin?.('authorized-peer');
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: note.id,
+                  deletedAt: 'not-a-timestamp',
+                  deletionId: 'malformed',
+                },
+                { peerId: 'authorized-peer' }
+              );
+              room.onMessage?.(
+                {
+                  type: 'tombstone',
+                  noteId: note.id,
+                  deletedAt: '2026-02-01T00:00:00.000Z',
+                  deletionId: 'unauthorized',
+                },
+                { peerId: 'intruder' }
+              );
+            });
+            await flushAsyncTicks();
+
+            expect(deviceDb.notesMap.has(note.id)).toBe(true);
+            expect(deviceDb.tombstonesMap.has(note.id)).toBe(false);
+            warn.mockRestore();
+          });
+
+          it('serializes concurrent note writes and deletions so a deleted note cannot reappear', async () => {
+            const note = await makeNote('delete-race', 'Race', 'Body', '2026-01-02T00:00:00.000Z');
+            const deviceDb = createMockDb();
+
+            await dbContext.run(deviceDb, async () => {
+              await Promise.all([
+                persistIncomingNote(note, false),
+                applyRemoteTombstone({
+                  noteId: note.id,
+                  deletedAt: '2026-02-01T00:00:00.000Z',
+                  deletionId: 'race-delete',
+                }),
+              ]);
+            });
+
+            expect(deviceDb.notesMap.has(note.id)).toBe(false);
+            expect(deviceDb.tombstonesMap.get(note.id)?.scope).toBe('propagated');
+            const staleWrite = await dbContext.run(deviceDb, () =>
+              persistIncomingNote(note, false)
+            );
+            expect(staleWrite).toBe('blocked');
+          });
+
+          it('allows only selected manual sync to restore a local-only tombstone', async () => {
+            const note = await makeNote('manual-restore', 'Restore', 'Body', '2026-01-02T00:00:00.000Z');
+            const dbA = createMockDb([note], [pairing]);
+            const dbB = createMockDb([note], [pairing]);
+            const tombstone = await dbContext.run(dbA, () => deleteNoteWithTombstone(note.id));
+            const mountA = await mountSyncHook('device-A', dbA);
+            const mountB = await mountSyncHook('device-B', dbB);
+            cleanups.push(mountA.unmount, mountB.unmount);
+            setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+            await act(async () => {
+              await mountA.api().requestPeerManifest(pairing.id);
+            });
+            await flushAsyncTicks();
+            expect(mountA.api().manualPreview.stage).toBe('ready');
+
+            await act(async () => {
+              await mountA.api().syncSelectedWithPeer(pairing.id, [note.id]);
+            });
+            await flushAsyncTicks();
+
+            expect(dbA.notesMap.get(note.id)?.content).toBe(note.content);
+            expect(dbA.tombstonesMap.has(note.id)).toBe(false);
+            expect(tombstone?.scope).toBe('local');
+          });
+
+          it('blocks ordinary sync resurrection after a propagated deletion', async () => {
+            const note = await makeNote('no-resurrection', 'Stale', 'Body', '2026-01-02T00:00:00.000Z');
+            const dbA = createMockDb([], [pairing]);
+            const dbB = createMockDb([note], [pairing]);
+            const mountA = await mountSyncHook('device-A', dbA);
+            const mountB = await mountSyncHook('device-B', dbB);
+            cleanups.push(mountA.unmount, mountB.unmount);
+            setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+            await dbContext.run(dbA, () =>
+              applyRemoteTombstone({
+                noteId: note.id,
+                deletedAt: '2026-02-01T00:00:00.000Z',
+                deletionId: 'already-propagated',
+              })
+            );
+            await act(async () => {
+              void mountB.api().triggerSync();
+            });
+            await flushAsyncTicks();
+
+            expect(dbA.notesMap.has(note.id)).toBe(false);
+            expect(dbA.tombstonesMap.get(note.id)?.scope).toBe('propagated');
+            expect(mountB.api().syncStatus.stage).toBe('error');
           });
         });
         return true;

@@ -24,15 +24,29 @@ export interface Pairing {
   pairedAt: string; // ISO timestamp
 }
 
+export interface Tombstone {
+  noteId: string;
+  deletedAt: string;
+  deletionId: string;
+  scope: 'local' | 'propagated';
+  deliveryFailures: number;
+}
+
 export class NotebookDB extends Dexie {
   notes!: Table<Note, string>;
   pairings!: Table<Pairing, string>;
+  tombstones!: Table<Tombstone, string>;
 
   constructor() {
     super('NotebookDB');
     this.version(1).stores({
       notes: 'id, updatedAt, title',
       pairings: 'id, label, pairedAt',
+    });
+    this.version(2).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+      tombstones: 'noteId, &deletionId, deletedAt, scope',
     });
   }
 }
@@ -65,7 +79,7 @@ Happy note-taking!`;
     const attachments: Record<string, AttachmentEntry> = {};
     const contentHash = await computeContentHash(content, attachments);
 
-    await db.notes.add({
+    const welcomeNote: Note = {
       id: 'welcome-note-default-id',
       title: 'Welcome to Notebook',
       content,
@@ -73,6 +87,15 @@ Happy note-taking!`;
       createdAt: now,
       updatedAt: now,
       contentHash,
+    };
+
+    await db.transaction('rw', db.notes, db.tombstones, async () => {
+      if (
+        (await db.notes.count()) === 0 &&
+        !(await db.tombstones.get(welcomeNote.id))
+      ) {
+        await db.notes.add(welcomeNote);
+      }
     });
   }
 }

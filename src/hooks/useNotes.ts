@@ -1,8 +1,9 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { db, type Note } from '@/lib/db';
+import { db, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
+import { deleteNoteWithTombstone } from '@/lib/tombstones';
 
 export type SortOrder = 'lastChange' | 'ascending' | 'descending';
 
@@ -83,8 +84,9 @@ export function useNotes() {
     return note.id;
   }, [reload]);
 
-  const deleteNote = useCallback(async (id: string) => {
-    await db.notes.delete(id);
+  const deleteNote = useCallback(async (id: string): Promise<Tombstone | null> => {
+    const tombstone = await deleteNoteWithTombstone(id);
+    if (!tombstone) return null;
     setNotes((prev) => {
       const next = prev.filter((n) => n.id !== id);
       if (activeId === id) {
@@ -94,6 +96,7 @@ export function useNotes() {
       }
       return next;
     });
+    return tombstone;
   }, [activeId]);
 
   const updateNote = useCallback(

@@ -67,6 +67,17 @@ export type SyncMessage =
       noteId: string;
       reason?: string;
     }
+  | {
+      type: 'tombstone';
+      noteId: string;
+      deletedAt: string;
+      deletionId: string;
+    }
+  | {
+      type: 'tombstone-ack';
+      noteId: string;
+      deletionId: string;
+    }
   | { type: 'done' };
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -391,6 +402,28 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         sessionId: data.sessionId,
         noteId: data.noteId,
         ...(data.reason !== undefined ? { reason: data.reason } : {}),
+      };
+    }
+
+    case 'tombstone': {
+      if (!isValidNoteId(data.noteId)) return null;
+      if (!isValidNoteId(data.deletionId)) return null;
+      if (!isValidTimestamp(data.deletedAt)) return null;
+      return {
+        type: 'tombstone',
+        noteId: data.noteId,
+        deletedAt: data.deletedAt,
+        deletionId: data.deletionId,
+      };
+    }
+
+    case 'tombstone-ack': {
+      if (!isValidNoteId(data.noteId)) return null;
+      if (!isValidNoteId(data.deletionId)) return null;
+      return {
+        type: 'tombstone-ack',
+        noteId: data.noteId,
+        deletionId: data.deletionId,
       };
     }
 

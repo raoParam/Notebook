@@ -159,6 +159,27 @@ describe('parseSyncMessage', () => {
       noteId: 'n1',
       reason: 'Note not found',
     });
+
+    expect(
+      parseSyncMessage({
+        type: 'tombstone',
+        noteId: 'n1',
+        deletedAt: '2026-01-02T00:00:00.000Z',
+        deletionId: 'delete-1',
+      })
+    ).toEqual({
+      type: 'tombstone',
+      noteId: 'n1',
+      deletedAt: '2026-01-02T00:00:00.000Z',
+      deletionId: 'delete-1',
+    });
+    expect(
+      parseSyncMessage({
+        type: 'tombstone-ack',
+        noteId: 'n1',
+        deletionId: 'delete-1',
+      })
+    ).toEqual({ type: 'tombstone-ack', noteId: 'n1', deletionId: 'delete-1' });
   });
 
   it('rejects invalid ack, note-error, and invalid session/transfer metadata fields', () => {
@@ -194,6 +215,25 @@ describe('parseSyncMessage', () => {
     ).toEqual({ type: 'manifest', entries: [], autoSync: true });
     expect(
       parseSyncMessage({ type: 'note', payload: [1, 2], transferId: 'bad\nid' })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'tombstone',
+        noteId: 'n1',
+        deletedAt: 'invalid',
+        deletionId: 'delete-1',
+      })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'tombstone',
+        noteId: '',
+        deletedAt: '2026-01-02T00:00:00.000Z',
+        deletionId: 'delete-1',
+      })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({ type: 'tombstone-ack', noteId: 'n1', deletionId: '' })
     ).toBeNull();
   });
 
