@@ -7,7 +7,7 @@ import {
   compressNote,
   computeDiff,
   decompressNote,
-  type ManifestEntry,
+  parseSyncMessage,
 } from '@/lib/sync';
 import { computeContentHash } from '@/lib/hash';
 import { getIceServers, type IceServer } from '@/lib/turn';
@@ -113,56 +113,70 @@ export function useSync(onNotesChanged: () => void) {
       // NOTE: onMessage must NOT be async directly to avoid message channel closing warnings
       syncAction.onMessage = (data: unknown, { peerId }: { peerId: string }) => {
         void (async () => {
-          if (typeof data !== 'object' || data === null) return;
-          const msg = data as Record<string, unknown>;
-
-          // Phase 1: Peer sends manifest → compute what WE need + what PEER needs
-          if (msg.type === 'manifest') {
-            const peerManifest = msg.entries as ManifestEntry[];
-            const localManifest = await buildLocalManifest(db);
-
-            // What we need from peer
-            const toRequest = computeDiff(localManifest, peerManifest);
-            sendData({ type: 'request', noteIds: toRequest }, peerId);
-
-            // What peer needs from us
-            const peerNeeds = computeDiff(peerManifest, localManifest);
-            for (const noteId of peerNeeds) {
-              const note = await db.notes.get(noteId);
-              if (note) {
-                const compressed = await compressNote(note);
-                sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
-              }
+          try {
+            const msg = parseSyncMessage(data);
+            if (!msg) {
+              console.warn('Ignoring invalid sync message from peer:', peerId);
+              return;
             }
-            sendData({ type: 'done' }, peerId);
-          }
 
-          // Phase 2: Peer requests specific notes from us
-          if (msg.type === 'request') {
-            const noteIds = msg.noteIds as string[];
-            for (const noteId of noteIds) {
-              const note = await db.notes.get(noteId);
-              if (note) {
-                const compressed = await compressNote(note);
-                sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+            // Phase 1: Peer sends manifest → compute what WE need + what PEER needs
+            if (msg.type === 'manifest') {
+              const localManifest = await buildLocalManifest(db);
+
+              // What we need from peer
+              const toRequest = computeDiff(localManifest, msg.entries);
+              sendData({ type: 'request', noteIds: toRequest }, peerId);
+
+              // What peer needs from us
+              const peerNeeds = computeDiff(msg.entries, localManifest);
+              for (const noteId of peerNeeds) {
+                const note = await db.notes.get(noteId);
+                if (note) {
+                  const compressed = await compressNote(note);
+                  sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+                }
               }
+              sendData({ type: 'done' }, peerId);
+              return;
             }
-          }
 
-          // Phase 3: Receive a note payload
-          if (msg.type === 'note') {
-            const arr = new Uint8Array(msg.payload as number[]);
-            try {
-              const note = await decompressNote(arr);
+            // Phase 2: Peer requests specific notes from us
+            if (msg.type === 'request') {
+              for (const noteId of msg.noteIds) {
+                const note = await db.notes.get(noteId);
+                if (note) {
+                  const compressed = await compressNote(note);
+                  sendData({ type: 'note', payload: Array.from(compressed) }, peerId);
+                }
+              }
+              return;
+            }
+
+            // Phase 3: Receive a note payload
+            if (msg.type === 'note') {
+              const note = await decompressNote(msg.payload);
               const existing = await db.notes.get(note.id);
-              if (!existing || new Date(note.updatedAt) > new Date(existing.updatedAt)) {
+              const incomingTime = Date.parse(note.updatedAt);
+              const existingTime = existing
+                ? Date.parse(existing.updatedAt)
+                : Number.NEGATIVE_INFINITY;
+              if (!existing || !Number.isFinite(existingTime) || incomingTime > existingTime) {
                 const hash = await computeContentHash(note.content, note.attachments);
-                await db.notes.put({ ...note, contentHash: hash });
+                await db.notes.put({
+                  id: note.id,
+                  title: note.title,
+                  content: note.content,
+                  attachments: note.attachments,
+                  createdAt: note.createdAt,
+                  updatedAt: note.updatedAt,
+                  contentHash: hash,
+                });
                 onNotesChanged();
               }
-            } catch (e) {
-              console.warn('Failed to decompress note payload:', e);
             }
+          } catch (e) {
+            console.warn('Failed to handle incoming sync message:', e);
           }
         })();
       };

@@ -10,6 +10,7 @@ import { PairDevice } from '@/components/PairDevice';
 import { SyncButton } from '@/components/SyncButton';
 import { SettingsModal } from '@/components/SettingsModal';
 import type { Note } from '@/lib/db';
+import { renderSafeMarkdown, resolveSafeAttachments } from '@/lib/markdown';
 
 export default function NotebookPage() {
   const {
@@ -75,10 +76,8 @@ export default function NotebookPage() {
 
   const handleExportPdf = useCallback(async () => {
     if (!activeNote) return;
-    const { marked } = await import('marked');
-    marked.setOptions({ breaks: true, gfm: true });
 
-    const content = resolveAttachments(activeNote);
+    const renderedHtml = await renderSafeMarkdown(activeNote.content, activeNote.attachments);
     const title = activeNote.title.trim() || 'Untitled';
 
     const el = document.createElement('div');
@@ -88,7 +87,7 @@ export default function NotebookPage() {
     el.innerHTML = `
       <h1 style="font-family:'Source Serif 4',serif;font-size:24px;font-weight:600;margin-bottom:8px;color:#16324F;">${escHtml(title)}</h1>
       <hr style="border:none;border-top:1px solid #DEDAD0;margin-bottom:20px;">
-      <div style="font-size:14px;">${await marked.parse(content)}</div>
+      <div style="font-size:14px;">${renderedHtml}</div>
     `;
 
     el.querySelectorAll('h1,h2,h3,h4').forEach((h) => {
@@ -141,7 +140,7 @@ export default function NotebookPage() {
           margin: [0.5, 0.5, 0.5, 0.5],
           filename: safeFileName(title) + '.pdf',
           image: { type: 'jpeg', quality: 0.98 },
-          html2canvas: { scale: 2, useCORS: true, allowTaint: true, letterRendering: true },
+          html2canvas: { scale: 2, useCORS: true, letterRendering: true },
           jsPDF: { unit: 'in', format: 'a4', orientation: 'portrait' },
         })
         .from(el)
@@ -398,10 +397,7 @@ const iconBtnStyle: React.CSSProperties = {
 
 function resolveAttachments(note: Note): string {
   if (!note.content) return note.content;
-  return note.content.replace(/!\[([^\]\r\n]+)\](?!\()/g, (match, label) => {
-    const att = note.attachments[label.trim()];
-    return att ? `![${label}](${att.data})` : match;
-  });
+  return resolveSafeAttachments(note.content, note.attachments);
 }
 
 function escHtml(s: string): string {
