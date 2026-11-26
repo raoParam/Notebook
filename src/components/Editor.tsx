@@ -7,6 +7,7 @@ import React, {
   useState,
 } from 'react';
 import type { Note } from '@/lib/db';
+import { processImageUpload } from '@/lib/imageUpload';
 import { Toolbar } from './Toolbar';
 import { MarkdownPreview } from './MarkdownPreview';
 import { DrawingCanvas } from './DrawingCanvas';
@@ -21,34 +22,6 @@ interface EditorProps {
 
 type MobileTab = 'write' | 'preview';
 type FullScreenMode = 'none' | 'write' | 'preview';
-
-function resizeImageFile(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const dataUrl = reader.result as string;
-      const img = new Image();
-      img.onload = () => {
-        const maxSide = 1400;
-        const largest = Math.max(img.width, img.height);
-        if (largest <= maxSide && file.size <= 900 * 1024) { resolve(dataUrl); return; }
-        const scale = Math.min(1, maxSide / largest);
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(img.width * scale));
-        canvas.height = Math.max(1, Math.round(img.height * scale));
-        const ctx = canvas.getContext('2d')!;
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.88));
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
 function cleanAlt(name: string): string {
   return (name || 'image')
@@ -76,6 +49,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   const [mobileTab, setMobileTab] = useState<MobileTab>('write');
   const [fullScreenMode, setFullScreenMode] = useState<FullScreenMode>('none');
   const [showDrawing, setShowDrawing] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const saveTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [title, setTitle] = useState(note.title);
   const [content, setContent] = useState(note.content);
@@ -89,6 +63,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       setTitle(note.title);
       setContent(note.content);
       setShowDrawing(false);
+      setUploadError(null);
       setFullScreenMode('none');
       return;
     }
@@ -198,8 +173,9 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   }
 
   async function handleImageUpload(file: File) {
+    setUploadError(null);
     try {
-      const dataUrl = await resizeImageFile(file);
+      const dataUrl = await processImageUpload(file);
       const attachments = { ...note.attachments };
       const label = uniqueLabel(attachments, file.name);
       attachments[label] = {
@@ -211,12 +187,15 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       setContent(newContent);
       lastWrittenRef.current = { title, content: newContent };
       onUpdate({ attachments, content: newContent, title });
-    } catch {
-      alert('Could not add that image. Please try another file.');
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Could not add that image. Please try another file.';
+      setUploadError(message);
     }
   }
 
   function handleDrawingInsert(dataUrl: string) {
+    setUploadError(null);
     const attachments = { ...note.attachments };
     const label = uniqueLabel(attachments, 'drawing');
     attachments[label] = {
@@ -335,6 +314,43 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         onExitFullScreen={() => setFullScreenMode('none')}
         fullScreenMode={fullScreenMode}
       />
+
+      {uploadError && (
+        <div
+          role="alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 10,
+            padding: '8px 14px',
+            background: 'rgba(239, 68, 68, 0.1)',
+            borderBottom: '1px solid var(--border)',
+            color: 'var(--danger)',
+            fontSize: 12.5,
+            fontWeight: 500,
+            flexShrink: 0,
+          }}
+        >
+          <span>{uploadError}</span>
+          <button
+            type="button"
+            onClick={() => setUploadError(null)}
+            aria-label="Dismiss image upload error"
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'inherit',
+              cursor: 'pointer',
+              padding: '0 4px',
+              fontSize: 15,
+              lineHeight: 1,
+            }}
+          >
+            &times;
+          </button>
+        </div>
+      )}
 
       {/* Drawing panel */}
       {showDrawing && (

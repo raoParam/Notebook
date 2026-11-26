@@ -97,13 +97,9 @@ export function Toolbar({
   const handleImageChange = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (!file) return;
-      if (!file.type.startsWith('image/')) {
-        alert('Please choose an image file.');
-        return;
-      }
-      onImageUpload(file);
       e.target.value = '';
+      if (!file) return;
+      onImageUpload(file);
     },
     [onImageUpload]
   );
@@ -155,7 +151,7 @@ export function Toolbar({
       <input
         ref={imgRef}
         type="file"
-        accept="image/*"
+        accept="image/png,image/jpeg,image/gif,image/webp"
         onChange={handleImageChange}
         style={{ display: 'none' }}
       />
