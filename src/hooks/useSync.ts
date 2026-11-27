@@ -2,7 +2,12 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { db, type Pairing, type Tombstone } from '@/lib/db';
-import { applyRemoteTombstone, persistIncomingNote, updateTombstoneDelivery } from '@/lib/tombstones';
+import {
+  applyRemoteTombstone,
+  persistIncomingNote,
+  prepareDeletionDeliveries,
+  updateTombstoneDelivery,
+} from '@/lib/tombstones';
 import {
   buildLocalManifest,
   classifyPeerNotes,
@@ -340,6 +345,14 @@ export function useSync(onNotesChanged: () => void) {
     []
   );
 
+  const getConnectedPeers = useCallback((): PeerState[] => {
+    return connectedPeersRef.current.filter(
+      (peer) =>
+        roomsRef.current.has(peer.pairingId) &&
+        desiredRoomsRef.current.has(peer.pairingId)
+    );
+  }, []);
+
   const propagateDeletion = useCallback(
     async (tombstone: Tombstone) => {
       const current = await db.tombstones.get(tombstone.noteId);
@@ -351,56 +364,102 @@ export function useSync(onNotesChanged: () => void) {
         return;
       }
 
-      const connectedAtDeletion = [...connectedPeersRef.current];
-      for (const peer of connectedAtDeletion) {
-        if (
-          !connectedPeersRef.current.some(
-            (connected) =>
-              connected.pairingId === peer.pairingId && connected.peerId === peer.peerId
-          ) ||
-          !roomsRef.current.has(peer.pairingId) ||
-          !desiredRoomsRef.current.has(peer.pairingId)
-        ) {
+      // Snapshot only currently connected peers in active desired rooms.
+      // Offline peers are never queued for future deletion delivery.
+      const connectedSnapshot = connectedPeersRef.current.filter(
+        (peer) =>
+          roomsRef.current.has(peer.pairingId) &&
+          desiredRoomsRef.current.has(peer.pairingId)
+      );
+
+      const deliveries = await prepareDeletionDeliveries(tombstone, connectedSnapshot);
+      const pendingDeliveries = deliveries.filter((delivery) => delivery.status === 'pending');
+      if (pendingDeliveries.length === 0) {
+        return;
+      }
+
+      const targetsToSend: Array<{ pairingId: string; peerId: string; ackKey: string }> = [];
+
+      for (const delivery of pendingDeliveries) {
+        const key = deletionAckKey(delivery.pairingId, delivery.peerId, tombstone.deletionId);
+        if (pendingDeletionAcksRef.current.has(key)) {
           continue;
         }
 
-        const key = deletionAckKey(peer.pairingId, peer.peerId, tombstone.deletionId);
+        const stillConnected =
+          connectedPeersRef.current.some(
+            (connected) =>
+              connected.pairingId === delivery.pairingId &&
+              connected.peerId === delivery.peerId
+          ) &&
+          roomsRef.current.has(delivery.pairingId) &&
+          desiredRoomsRef.current.has(delivery.pairingId);
+
+        if (!stillConnected) {
+          await updateTombstoneDelivery(
+            tombstone,
+            { pairingId: delivery.pairingId, peerId: delivery.peerId },
+            'failed'
+          ).catch((err) => {
+            console.warn('Failed to record deletion delivery failure:', err);
+          });
+          continue;
+        }
+
         const timeoutId = setTimeout(() => {
           const pending = pendingDeletionAcksRef.current.get(key);
-          if (pending?.tombstone.deletionId !== tombstone.deletionId) return;
+          if (!pending || pending.tombstone.deletionId !== tombstone.deletionId) return;
           pendingDeletionAcksRef.current.delete(key);
-          void updateTombstoneDelivery(tombstone, 'failed').catch((err) => {
+          void updateTombstoneDelivery(
+            tombstone,
+            { pairingId: delivery.pairingId, peerId: delivery.peerId },
+            'failed'
+          ).catch((err) => {
             console.warn('Failed to record deletion delivery failure:', err);
           });
         }, SYNC_TIMEOUT_MS);
+
         pendingDeletionAcksRef.current.set(key, {
-          pairingId: peer.pairingId,
-          peerId: peer.peerId,
+          pairingId: delivery.pairingId,
+          peerId: delivery.peerId,
           tombstone,
           timeoutId,
         });
-
-        const sent = await sendForPairing(
-          peer.pairingId,
-          {
-            type: 'tombstone',
-            noteId: tombstone.noteId,
-            deletedAt: tombstone.deletedAt,
-            deletionId: tombstone.deletionId,
-          },
-          peer.peerId
-        );
-        if (!sent) {
-          const pending = pendingDeletionAcksRef.current.get(key);
-          if (pending) {
-            clearTimeout(pending.timeoutId);
-            pendingDeletionAcksRef.current.delete(key);
-            await updateTombstoneDelivery(tombstone, 'failed').catch((err) => {
-              console.warn('Failed to record deletion delivery failure:', err);
-            });
-          }
-        }
+        targetsToSend.push({
+          pairingId: delivery.pairingId,
+          peerId: delivery.peerId,
+          ackKey: key,
+        });
       }
+
+      await Promise.all(
+        targetsToSend.map(async ({ pairingId, peerId, ackKey }) => {
+          const sent = await sendForPairing(
+            pairingId,
+            {
+              type: 'tombstone',
+              noteId: tombstone.noteId,
+              deletedAt: tombstone.deletedAt,
+              deletionId: tombstone.deletionId,
+            },
+            peerId
+          );
+          if (!sent) {
+            const pending = pendingDeletionAcksRef.current.get(ackKey);
+            if (pending && pending.tombstone.deletionId === tombstone.deletionId) {
+              clearTimeout(pending.timeoutId);
+              pendingDeletionAcksRef.current.delete(ackKey);
+              await updateTombstoneDelivery(
+                tombstone,
+                { pairingId, peerId },
+                'failed'
+              ).catch((err) => {
+                console.warn('Failed to record deletion delivery failure:', err);
+              });
+            }
+          }
+        })
+      );
     },
     [sendForPairing]
   );
@@ -801,14 +860,18 @@ export function useSync(onNotesChanged: () => void) {
           pendingAcksRef.current.delete(transferId);
         }
       }
-      for (const [key, pending] of pendingDeletionAcksRef.current) {
+      for (const [key, pending] of Array.from(pendingDeletionAcksRef.current.entries())) {
         if (
           pending.pairingId === pairingId &&
           (peerId === undefined || pending.peerId === peerId)
         ) {
           clearTimeout(pending.timeoutId);
           pendingDeletionAcksRef.current.delete(key);
-          void updateTombstoneDelivery(pending.tombstone, 'failed').catch((err) => {
+          void updateTombstoneDelivery(
+            pending.tombstone,
+            { pairingId: pending.pairingId, peerId: pending.peerId },
+            'failed'
+          ).catch((err) => {
             console.warn('Failed to record deletion delivery failure:', err);
           });
         }
@@ -997,13 +1060,17 @@ export function useSync(onNotesChanged: () => void) {
 
                 const key = peerCompositeKey(pairing.id, peerId);
 
+                // Trust boundary: a currently connected peer in an established, active
+                // pairing room may send deletions independently of an active note-sync
+                // session so online deletes propagate immediately. Unpaired, disconnected,
+                // or undesired-room peers are always rejected.
                 if (msg.type === 'tombstone') {
                   const isEstablishedPeer = connectedPeersRef.current.some(
                     (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
                   );
                   if (
                     !isEstablishedPeer ||
-                    !roomsRef.current.has(pairing.id) ||
+                    roomsRef.current.get(pairing.id) !== entry ||
                     !desiredRoomsRef.current.has(pairing.id)
                   ) {
                     console.warn('Rejecting deletion from an unpaired or disconnected peer:', peerId);
@@ -1011,9 +1078,13 @@ export function useSync(onNotesChanged: () => void) {
                   }
                   const removedNote = await applyRemoteTombstone(msg);
                   if (removedNote) onNotesChangedRef.current();
-                  if (connectedPeersRef.current.some(
-                    (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
-                  )) {
+                  if (
+                    connectedPeersRef.current.some(
+                      (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
+                    ) &&
+                    roomsRef.current.get(pairing.id) === entry &&
+                    desiredRoomsRef.current.has(pairing.id)
+                  ) {
                     await sendForPairing(
                       pairing.id,
                       {
@@ -1028,12 +1099,26 @@ export function useSync(onNotesChanged: () => void) {
                 }
 
                 if (msg.type === 'tombstone-ack') {
+                  const isEstablishedPeer = connectedPeersRef.current.some(
+                    (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
+                  );
+                  if (
+                    !isEstablishedPeer ||
+                    roomsRef.current.get(pairing.id) !== entry ||
+                    !desiredRoomsRef.current.has(pairing.id)
+                  ) {
+                    return;
+                  }
                   const ackKey = deletionAckKey(pairing.id, peerId, msg.deletionId);
                   const pending = pendingDeletionAcksRef.current.get(ackKey);
                   if (!pending || pending.tombstone.noteId !== msg.noteId) return;
                   clearTimeout(pending.timeoutId);
                   pendingDeletionAcksRef.current.delete(ackKey);
-                  await updateTombstoneDelivery(pending.tombstone, 'accepted');
+                  await updateTombstoneDelivery(
+                    pending.tombstone,
+                    { pairingId: pairing.id, peerId },
+                    'accepted'
+                  );
                   return;
                 }
 
@@ -1860,7 +1945,11 @@ export function useSync(onNotesChanged: () => void) {
       pendingAcksMap.clear();
       for (const pending of pendingDeletionAcksMap.values()) {
         clearTimeout(pending.timeoutId);
-        void updateTombstoneDelivery(pending.tombstone, 'failed').catch((err) => {
+        void updateTombstoneDelivery(
+          pending.tombstone,
+          { pairingId: pending.pairingId, peerId: pending.peerId },
+          'failed'
+        ).catch((err) => {
           console.warn('Failed to record deletion delivery failure:', err);
         });
       }
@@ -2353,6 +2442,7 @@ export function useSync(onNotesChanged: () => void) {
     peerAutoSync,
     notifyLocalNoteChange,
     propagateDeletion,
+    getConnectedPeers,
     manualPreview,
     requestPeerManifest,
     syncAllWithPeer,

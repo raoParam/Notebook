@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 import Dexie from 'dexie';
 import { afterEach, describe, expect, it } from 'vitest';
-import { deleteNoteWithTombstone } from '@/lib/tombstones';
+import { deleteNoteWithTombstone, updateTombstoneDelivery } from '@/lib/tombstones';
 import { db, NotebookDB, seedIfEmpty } from '@/lib/db';
 
 describe('NotebookDB schema migration', () => {
@@ -9,7 +9,7 @@ describe('NotebookDB schema migration', () => {
     await Dexie.delete('NotebookDB');
   });
 
-  it('upgrades a v1 database by adding tombstones without losing existing notes', async () => {
+  it('upgrades a v1 database by adding tombstones and deletionDeliveries without losing existing notes', async () => {
     const legacy = new Dexie('NotebookDB');
     legacy.version(1).stores({
       notes: 'id, updatedAt, title',
@@ -29,7 +29,7 @@ describe('NotebookDB schema migration', () => {
 
     const upgraded = new NotebookDB();
     await upgraded.open();
-    expect(upgraded.verno).toBe(2);
+    expect(upgraded.verno).toBe(3);
     expect((await upgraded.notes.get('legacy-note'))?.content).toBe('Keep me');
     expect(await upgraded.tombstones.count()).toBe(0);
     expect(upgraded.tombstones.schema.primKey.name).toBe('noteId');
@@ -38,10 +38,77 @@ describe('NotebookDB schema migration', () => {
       'deletedAt',
       'scope',
     ]);
+    expect(await upgraded.deletionDeliveries.count()).toBe(0);
+    expect(upgraded.deletionDeliveries.schema.primKey.name).toBe('id');
+    expect(upgraded.deletionDeliveries.schema.indexes.map((index) => index.name)).toEqual([
+      'deletionId',
+      'noteId',
+      '[pairingId+peerId]',
+      'status',
+    ]);
     upgraded.close();
   });
 
-  it('persists atomic local deletion tombstones across database reopen', async () => {
+  it('upgrades a v2 database with existing tombstones and deliveryFailures safely to v3', async () => {
+    const v2 = new Dexie('NotebookDB');
+    v2.version(1).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+    });
+    v2.version(2).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+      tombstones: 'noteId, &deletionId, deletedAt, scope',
+    });
+    await v2.open();
+    await v2.table('notes').put({
+      id: 'v2-note',
+      title: 'V2 Note',
+      content: 'Still here',
+      attachments: {},
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      contentHash: 'v2-hash',
+    });
+    await v2.table('tombstones').bulkPut([
+      {
+        noteId: 'v2-deleted-valid',
+        deletedAt: '2026-01-03T00:00:00.000Z',
+        deletionId: 'del-v2-valid',
+        scope: 'local',
+        deliveryFailures: 2,
+      },
+      {
+        noteId: 'v2-deleted-legacy',
+        deletedAt: '2026-01-04T00:00:00.000Z',
+        deletionId: 'del-v2-legacy',
+      },
+    ]);
+    v2.close();
+
+    const upgraded = new NotebookDB();
+    await upgraded.open();
+    expect(upgraded.verno).toBe(3);
+    expect((await upgraded.notes.get('v2-note'))?.content).toBe('Still here');
+    expect(await upgraded.tombstones.get('v2-deleted-valid')).toEqual({
+      noteId: 'v2-deleted-valid',
+      deletedAt: '2026-01-03T00:00:00.000Z',
+      deletionId: 'del-v2-valid',
+      scope: 'local',
+      deliveryFailures: 2,
+    });
+    expect(await upgraded.tombstones.get('v2-deleted-legacy')).toEqual({
+      noteId: 'v2-deleted-legacy',
+      deletedAt: '2026-01-04T00:00:00.000Z',
+      deletionId: 'del-v2-legacy',
+      scope: 'local',
+      deliveryFailures: 0,
+    });
+    expect(await upgraded.deletionDeliveries.count()).toBe(0);
+    upgraded.close();
+  });
+
+  it('persists atomic local deletion tombstones and per-peer deliveries across database reopen', async () => {
     const firstLoad = new NotebookDB();
     await firstLoad.open();
     await firstLoad.notes.put({
@@ -54,15 +121,43 @@ describe('NotebookDB schema migration', () => {
       contentHash: 'persistent-hash',
     });
 
-    const tombstone = await deleteNoteWithTombstone('persistent-note', firstLoad);
+    const tombstone = await deleteNoteWithTombstone('persistent-note', firstLoad, [
+      { pairingId: 'room-1', peerId: 'peer-1' },
+      { pairingId: 'room-1', peerId: 'peer-2' },
+    ]);
+    expect(tombstone).not.toBeNull();
+    await updateTombstoneDelivery(
+      tombstone!,
+      { pairingId: 'room-1', peerId: 'peer-1' },
+      'accepted',
+      firstLoad
+    );
+    await updateTombstoneDelivery(
+      tombstone!,
+      { pairingId: 'room-1', peerId: 'peer-2' },
+      'failed',
+      firstLoad
+    );
     expect(await firstLoad.notes.get('persistent-note')).toBeUndefined();
-    expect(await firstLoad.tombstones.get('persistent-note')).toEqual(tombstone);
+    const expectedTombstone = {
+      ...tombstone!,
+      scope: 'propagated' as const,
+      deliveryFailures: 1,
+    };
+    expect(await firstLoad.tombstones.get('persistent-note')).toEqual(expectedTombstone);
     firstLoad.close();
 
     const reloaded = new NotebookDB();
     await reloaded.open();
     expect(await reloaded.notes.get('persistent-note')).toBeUndefined();
-    expect(await reloaded.tombstones.get('persistent-note')).toEqual(tombstone);
+    expect(await reloaded.tombstones.get('persistent-note')).toEqual(expectedTombstone);
+    const deliveries = await reloaded.deletionDeliveries
+      .where('deletionId')
+      .equals(tombstone!.deletionId)
+      .toArray();
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries.find((d) => d.peerId === 'peer-1')?.status).toBe('accepted');
+    expect(deliveries.find((d) => d.peerId === 'peer-2')?.status).toBe('failed');
     reloaded.close();
   });
 

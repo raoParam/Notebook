@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { db, type Note, type Tombstone } from '@/lib/db';
+import { db, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { deleteNoteWithTombstone } from '@/lib/tombstones';
 
@@ -84,20 +84,23 @@ export function useNotes() {
     return note.id;
   }, [reload]);
 
-  const deleteNote = useCallback(async (id: string): Promise<Tombstone | null> => {
-    const tombstone = await deleteNoteWithTombstone(id);
-    if (!tombstone) return null;
-    setNotes((prev) => {
-      const next = prev.filter((n) => n.id !== id);
-      if (activeId === id) {
-        const newActive = next.length > 0 ? next[0].id : null;
-        setActiveId(newActive);
-        try { localStorage.setItem('nb-active-id', newActive ?? ''); } catch {}
-      }
-      return next;
-    });
-    return tombstone;
-  }, [activeId]);
+  const deleteNote = useCallback(
+    async (id: string, recipients?: DeletionRecipient[]): Promise<Tombstone | null> => {
+      const tombstone = await deleteNoteWithTombstone(id, db, recipients);
+      if (!tombstone) return null;
+      setNotes((prev) => {
+        const next = prev.filter((n) => n.id !== id);
+        if (activeId === id) {
+          const newActive = next.length > 0 ? next[0].id : null;
+          setActiveId(newActive);
+          try { localStorage.setItem('nb-active-id', newActive ?? ''); } catch {}
+        }
+        return next;
+      });
+      return tombstone;
+    },
+    [activeId]
+  );
 
   const updateNote = useCallback(
     async (id: string, patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>) => {
