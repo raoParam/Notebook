@@ -1898,7 +1898,6 @@ export function useSync(onNotesChanged: () => void) {
     const pendingAcksMap = pendingAcksRef.current;
     const pendingDeletionAcksMap = pendingDeletionAcksRef.current;
 
-    const mountTimeMs = Date.now();
     void (async () => {
       let storedAutoSync = false;
       try {
@@ -1915,7 +1914,7 @@ export function useSync(onNotesChanged: () => void) {
         void joinRoom(p);
       });
 
-      await reconcileInterruptedDeletionDeliveries(db, mountTimeMs).catch((err) => {
+      await reconcileInterruptedDeletionDeliveries(db).catch((err) => {
         console.warn('Failed to reconcile interrupted deletion deliveries:', err);
       });
     })();

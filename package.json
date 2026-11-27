@@ -27,7 +27,7 @@
     "@tailwindcss/postcss": "^4",
     "@types/dompurify": "^3.0.5",
     "@types/katex": "^0.16.8",
-    "@types/node": "^20",
+    "@types/node": "^24",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/uuid": "^10.0.0",

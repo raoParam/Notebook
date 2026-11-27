@@ -7,6 +7,7 @@ import type { DeletionDelivery, Note, Pairing, Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { compressNote } from '@/lib/sync';
 import {
+  STALE_PENDING_DELIVERY_MS,
   applyRemoteTombstone,
   deleteNoteWithTombstone,
   deletionDeliveryKey,
@@ -3076,14 +3077,14 @@ describe('useSync deletion tombstones', () => {
     expect(dbC2.tombstonesMap.get(noteOnA.id)?.scope).toBe('propagated');
   });
 
-  it('reconciles interrupted pending deletion deliveries on sync mount without queuing or retrying on reconnect', async () => {
+  it('reconciles interrupted pending deletion deliveries older than the stale threshold on sync mount without queuing or retrying on reconnect', async () => {
     const dbA = createMockDb([], [pairing]);
     const dbB = createMockDb([], [pairing]);
-    const priorIso = new Date(Date.now() - 1000).toISOString();
+    const staleIso = new Date(Date.now() - (STALE_PENDING_DELIVERY_MS + 5_000)).toISOString();
     const interruptedTombstone: Tombstone = {
       noteId: 'interrupted-note',
       noteTitle: 'Interrupted',
-      deletedAt: priorIso,
+      deletedAt: staleIso,
       deletionId: 'del-interrupted',
       scope: 'local',
       deliveryFailures: 0,
@@ -3097,7 +3098,7 @@ describe('useSync deletion tombstones', () => {
       pairingId: pairing.id,
       peerId: 'device-B',
       status: 'pending',
-      updatedAt: priorIso,
+      updatedAt: staleIso,
     });
 
     const mountA = await mountSyncHook('device-A', dbA);
@@ -3114,5 +3115,68 @@ describe('useSync deletion tombstones', () => {
     expect(
       network.sentMessages.filter((m) => (m.data as { type?: string }).type === 'tombstone')
     ).toHaveLength(0);
+  });
+
+  it('keeps a fresh pending deletion delivery pending when a second instance mounts and lets a valid ACK accept it', async () => {
+    const note = await makeNote('fresh-pending', 'Fresh Pending', 'Body', '2026-01-02T00:00:00.000Z');
+    const dbA = createMockDb([note], [pairing]);
+    const dbB = createMockDb([note], [pairing]);
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+
+    const heldAcks: Array<() => void> = [];
+    network.dropMessagePredicate = (wire) => {
+      const msg = wire.data as { type?: string };
+      if (wire.toPeerId === 'device-A' && msg.type === 'tombstone-ack') {
+        const roomA = network.rooms.find((r) => r.deviceId === 'device-A')!;
+        heldAcks.push(() => {
+          dbContext.run(dbA, () => {
+            currentDeviceId = 'device-A';
+            roomA.onMessage?.(structuredClone(wire.data), { peerId: wire.fromDevice });
+          });
+        });
+        return true;
+      }
+      return false;
+    };
+
+    const tombstone = await dbContext.run(dbA, () => deleteNoteWithTombstone(note.id));
+    await act(async () => {
+      await dbContext.run(dbA, () => mountA.api().propagateDeletion(tombstone!));
+    });
+    await flushAsyncTicks();
+
+    const deliveryKey = deletionDeliveryKey(tombstone!.deletionId, pairing.id, 'device-B');
+    expect(dbA.deletionDeliveriesMap.get(deliveryKey)?.status).toBe('pending');
+    expect(heldAcks).toHaveLength(1);
+
+    // Mount a second instance sharing dbA while the deletion delivery is still fresh and pending
+    const mountA2 = await mountSyncHook('device-A-tab2', dbA);
+    cleanups.push(mountA2.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-A-tab2': dbA, 'device-B': dbB });
+    await flushAsyncTicks();
+
+    // Fresh pending delivery must remain pending rather than being falsely failed
+    expect(dbA.deletionDeliveriesMap.get(deliveryKey)?.status).toBe('pending');
+    expect(dbA.tombstonesMap.get(note.id)).toMatchObject({
+      scope: 'local',
+      deliveryFailures: 0,
+    });
+
+    // Valid ACK arriving afterwards still transitions the delivery to accepted
+    network.dropMessagePredicate = null;
+    await act(async () => {
+      heldAcks.shift()!();
+    });
+    await flushAsyncTicks();
+
+    expect(dbA.deletionDeliveriesMap.get(deliveryKey)?.status).toBe('accepted');
+    expect(dbA.tombstonesMap.get(note.id)).toMatchObject({
+      scope: 'propagated',
+      deliveryFailures: 0,
+    });
   });
 });
