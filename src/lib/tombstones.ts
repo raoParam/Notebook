@@ -1,12 +1,15 @@
 import {
   db,
   type DeletionDelivery,
+  type DeletionDeliveryStatus,
   type DeletionRecipient,
   type Note,
   type NotebookDB,
   type Tombstone,
 } from './db';
 import { computeContentHash } from './hash';
+
+export const STALE_PENDING_DELIVERY_MS = 20_000;
 
 export type RemoteTombstone = Pick<Tombstone, 'noteId' | 'deletedAt' | 'deletionId'>;
 export type IncomingNoteResult = 'stored' | 'unchanged' | 'blocked' | 'inactive';
@@ -18,6 +21,22 @@ export type LocalNoteUpdateResult =
   | { status: 'saved'; note: Note }
   | { status: 'missing' }
   | { status: 'deleted' };
+
+export interface DeletionActivityRecipient {
+  id: string;
+  deviceName: string;
+  pairingMissing: boolean;
+  status: DeletionDeliveryStatus;
+  updatedAt: string;
+}
+
+export interface DeletionActivityEntry {
+  id: string;
+  noteTitle: string;
+  deletedAt: string;
+  origin: 'local' | 'remote';
+  recipients: DeletionActivityRecipient[];
+}
 
 export function deletionDeliveryKey(
   deletionId: string,
@@ -75,9 +94,11 @@ export async function deleteNoteWithTombstone(
       const deletedAtMs = Number.isFinite(noteTime)
         ? Math.max(Date.now(), noteTime + 1)
         : Date.now();
+      const trimmedTitle = note.title.trim();
 
       const tombstone: Tombstone = {
         noteId,
+        ...(trimmedTitle ? { noteTitle: trimmedTitle } : {}),
         deletedAt: new Date(deletedAtMs).toISOString(),
         deletionId: crypto.randomUUID(),
         scope: 'local',
@@ -170,6 +191,7 @@ export async function applyRemoteTombstone(
     database.deletionDeliveries,
     async () => {
       const current = await database.tombstones.get(incoming.noteId);
+      const note = await database.notes.get(incoming.noteId);
       const rawCurrentTime = current ? Date.parse(current.deletedAt) : Number.NEGATIVE_INFINITY;
       const currentTime = Number.isFinite(rawCurrentTime)
         ? rawCurrentTime
@@ -180,9 +202,12 @@ export async function applyRemoteTombstone(
         incomingTime > currentTime ||
         (incomingTime === currentTime && current.scope === 'local');
 
+      const preservedTitle = note?.title.trim() || current?.noteTitle?.trim() || undefined;
+
       const effective: Tombstone = useIncoming
         ? {
             noteId: incoming.noteId,
+            ...(preservedTitle ? { noteTitle: preservedTitle } : {}),
             deletedAt: incoming.deletedAt,
             deletionId: incoming.deletionId,
             scope: 'propagated',
@@ -191,10 +216,12 @@ export async function applyRemoteTombstone(
                 ? current.deliveryFailures
                 : 0,
           }
-        : current;
+        : {
+            ...current,
+            ...(preservedTitle && !current.noteTitle ? { noteTitle: preservedTitle } : {}),
+          };
 
       const effectiveTime = Date.parse(effective.deletedAt);
-      const note = await database.notes.get(incoming.noteId);
       const noteTime = note ? Date.parse(note.updatedAt) : Number.NEGATIVE_INFINITY;
 
       // Keep timestamp conflict resolution consistent: a strictly newer existing note
@@ -399,4 +426,113 @@ export async function updateTombstoneDelivery(
       });
     }
   );
+}
+
+/**
+ * Mark interrupted or stale pending deletion deliveries as failed without
+ * introducing automatic retries or offline deletion queues.
+ */
+export async function reconcileInterruptedDeletionDeliveries(
+  database: NotebookDB = db,
+  maxUpdatedAtMs: number = Date.now() - STALE_PENDING_DELIVERY_MS
+): Promise<number> {
+  return database.transaction(
+    'rw',
+    database.tombstones,
+    database.deletionDeliveries,
+    async () => {
+      const allDeliveries = await database.deletionDeliveries.toArray();
+      const stalePending = allDeliveries.filter((delivery) => {
+        if (delivery.status !== 'pending') return false;
+        const updatedMs = Date.parse(delivery.updatedAt);
+        return !Number.isFinite(updatedMs) || updatedMs <= maxUpdatedAtMs;
+      });
+      if (stalePending.length === 0) return 0;
+
+      const nowIso = new Date().toISOString();
+      const affectedNoteIds = new Set<string>();
+      for (const delivery of stalePending) {
+        await database.deletionDeliveries.put({
+          ...delivery,
+          status: 'failed',
+          updatedAt: nowIso,
+        });
+        affectedNoteIds.add(delivery.noteId);
+      }
+
+      for (const noteId of affectedNoteIds) {
+        const tombstone = await database.tombstones.get(noteId);
+        if (!tombstone) continue;
+        const forDeletion = await database.deletionDeliveries
+          .where('deletionId')
+          .equals(tombstone.deletionId)
+          .toArray();
+        const anyAccepted = forDeletion.some((d) => d.status === 'accepted');
+        const failedCount = forDeletion.filter((d) => d.status === 'failed').length;
+        await database.tombstones.put({
+          ...tombstone,
+          scope: anyAccepted || tombstone.scope === 'propagated' ? 'propagated' : 'local',
+          deliveryFailures: failedCount,
+        });
+      }
+
+      return stalePending.length;
+    }
+  );
+}
+
+export async function loadDeletionActivity(
+  database: NotebookDB = db,
+  stalePendingMs: number = STALE_PENDING_DELIVERY_MS
+): Promise<DeletionActivityEntry[]> {
+  await reconcileInterruptedDeletionDeliveries(database, Date.now() - stalePendingMs);
+
+  const [tombstones, deliveries, pairings] = await Promise.all([
+    database.tombstones.toArray(),
+    database.deletionDeliveries.toArray(),
+    database.pairings.toArray(),
+  ]);
+
+  const pairingNameMap = new Map(
+    pairings.map((pairing) => [pairing.id, pairing.label.trim() || 'Paired device'])
+  );
+  const deliveriesByDeletion = new Map<string, DeletionDelivery[]>();
+  for (const delivery of deliveries) {
+    const existing = deliveriesByDeletion.get(delivery.deletionId);
+    if (existing) existing.push(delivery);
+    else deliveriesByDeletion.set(delivery.deletionId, [delivery]);
+  }
+
+  const sortedTombstones = [...tombstones].sort((a, b) => {
+    const timeA = Date.parse(a.deletedAt);
+    const timeB = Date.parse(b.deletedAt);
+    return (Number.isFinite(timeB) ? timeB : 0) - (Number.isFinite(timeA) ? timeA : 0);
+  });
+
+  return sortedTombstones.map((tombstone) => {
+    const rawDeliveries = deliveriesByDeletion.get(tombstone.deletionId) ?? [];
+    const recipients: DeletionActivityRecipient[] = rawDeliveries
+      .map((delivery) => {
+        const knownName = pairingNameMap.get(delivery.pairingId);
+        return {
+          id: delivery.id,
+          deviceName: knownName ?? 'Removed device',
+          pairingMissing: knownName === undefined,
+          status: delivery.status,
+          updatedAt: delivery.updatedAt,
+        };
+      })
+      .sort((a, b) => a.deviceName.localeCompare(b.deviceName));
+
+    const origin: 'local' | 'remote' =
+      recipients.length > 0 || tombstone.scope === 'local' ? 'local' : 'remote';
+
+    return {
+      id: tombstone.deletionId,
+      noteTitle: tombstone.noteTitle?.trim() || 'Untitled',
+      deletedAt: tombstone.deletedAt,
+      origin,
+      recipients,
+    };
+  });
 }

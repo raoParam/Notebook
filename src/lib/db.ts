@@ -26,6 +26,7 @@ export interface Pairing {
 
 export interface Tombstone {
   noteId: string;
+  noteTitle?: string;
   deletedAt: string;
   deletionId: string;
   scope: 'local' | 'propagated';

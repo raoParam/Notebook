@@ -130,6 +130,7 @@ describe('NotebookDB schema migration', () => {
       { pairingId: 'room-1', peerId: 'peer-2' },
     ]);
     expect(tombstone).not.toBeNull();
+    expect(tombstone?.noteTitle).toBe('Persistent');
     await updateTombstoneDelivery(
       tombstone!,
       { pairingId: 'room-1', peerId: 'peer-1' },

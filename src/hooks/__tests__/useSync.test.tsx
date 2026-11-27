@@ -3075,4 +3075,44 @@ describe('useSync deletion tombstones', () => {
     expect(dbC2.notesMap.has(noteOnA.id)).toBe(false);
     expect(dbC2.tombstonesMap.get(noteOnA.id)?.scope).toBe('propagated');
   });
+
+  it('reconciles interrupted pending deletion deliveries on sync mount without queuing or retrying on reconnect', async () => {
+    const dbA = createMockDb([], [pairing]);
+    const dbB = createMockDb([], [pairing]);
+    const priorIso = new Date(Date.now() - 1000).toISOString();
+    const interruptedTombstone: Tombstone = {
+      noteId: 'interrupted-note',
+      noteTitle: 'Interrupted',
+      deletedAt: priorIso,
+      deletionId: 'del-interrupted',
+      scope: 'local',
+      deliveryFailures: 0,
+    };
+    const deliveryKey = deletionDeliveryKey('del-interrupted', pairing.id, 'device-B');
+    dbA.tombstonesMap.set('interrupted-note', interruptedTombstone);
+    dbA.deletionDeliveriesMap.set(deliveryKey, {
+      id: deliveryKey,
+      noteId: 'interrupted-note',
+      deletionId: 'del-interrupted',
+      pairingId: pairing.id,
+      peerId: 'device-B',
+      status: 'pending',
+      updatedAt: priorIso,
+    });
+
+    const mountA = await mountSyncHook('device-A', dbA);
+    const mountB = await mountSyncHook('device-B', dbB);
+    cleanups.push(mountA.unmount, mountB.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA, 'device-B': dbB });
+    await flushAsyncTicks();
+
+    expect(dbA.deletionDeliveriesMap.get(deliveryKey)?.status).toBe('failed');
+    expect(dbA.tombstonesMap.get('interrupted-note')).toMatchObject({
+      scope: 'local',
+      deliveryFailures: 1,
+    });
+    expect(
+      network.sentMessages.filter((m) => (m.data as { type?: string }).type === 'tombstone')
+    ).toHaveLength(0);
+  });
 });

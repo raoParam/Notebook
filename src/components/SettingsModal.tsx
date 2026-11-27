@@ -9,6 +9,7 @@ import {
   FONT_OPTIONS,
   cleanFont,
 } from '@/components/ThemeProvider';
+import { DeletionActivity } from '@/components/DeletionActivity';
 
 interface SettingsModalProps {
   onClose: () => void;
@@ -896,6 +897,10 @@ export function SettingsModal({
                     />
                   </button>
                 </div>
+
+                <hr style={{ border: 'none', borderTop: '1px solid var(--border)' }} />
+
+                <DeletionActivity />
               </div>
             )}
           </div>
