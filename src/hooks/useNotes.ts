@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { db, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
-import { deleteNoteWithTombstone } from '@/lib/tombstones';
+import { deleteNoteWithTombstone, updateNoteSafely } from '@/lib/tombstones';
 
 export type SortOrder = 'lastChange' | 'ascending' | 'descending';
 
@@ -104,19 +104,9 @@ export function useNotes() {
 
   const updateNote = useCallback(
     async (id: string, patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>) => {
-      const existing = await db.notes.get(id);
-      if (!existing) return;
-      const next: Note = {
-        ...existing,
-        ...patch,
-        updatedAt: new Date().toISOString(),
-      };
-      next.contentHash = await computeContentHash(
-        next.content,
-        next.attachments
-      );
-      await db.notes.put(next);
-      setNotes((prev) => prev.map((n) => (n.id === id ? next : n)));
+      const result = await updateNoteSafely(id, patch, db);
+      if (result.status !== 'saved') return;
+      setNotes((prev) => prev.map((n) => (n.id === id ? result.note : n)));
     },
     []
   );

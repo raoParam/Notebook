@@ -77,6 +77,7 @@ export type SyncMessage =
       type: 'tombstone-ack';
       noteId: string;
       deletionId: string;
+      outcome?: 'applied' | 'superseded';
     }
   | { type: 'done' };
 
@@ -420,10 +421,18 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
     case 'tombstone-ack': {
       if (!isValidNoteId(data.noteId)) return null;
       if (!isValidNoteId(data.deletionId)) return null;
+      if (
+        data.outcome !== undefined &&
+        data.outcome !== 'applied' &&
+        data.outcome !== 'superseded'
+      ) {
+        return null;
+      }
       return {
         type: 'tombstone-ack',
         noteId: data.noteId,
         deletionId: data.deletionId,
+        ...(data.outcome !== undefined ? { outcome: data.outcome } : {}),
       };
     }
 

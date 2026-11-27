@@ -1076,8 +1076,9 @@ export function useSync(onNotesChanged: () => void) {
                     console.warn('Rejecting deletion from an unpaired or disconnected peer:', peerId);
                     return;
                   }
-                  const removedNote = await applyRemoteTombstone(msg);
-                  if (removedNote) onNotesChangedRef.current();
+                  const result = await applyRemoteTombstone(msg);
+                  if (result.removedNote) onNotesChangedRef.current();
+                  if (result.outcome === 'invalid') return;
                   if (
                     connectedPeersRef.current.some(
                       (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
@@ -1091,6 +1092,7 @@ export function useSync(onNotesChanged: () => void) {
                         type: 'tombstone-ack',
                         noteId: msg.noteId,
                         deletionId: msg.deletionId,
+                        outcome: result.outcome,
                       },
                       peerId
                     );
@@ -1117,7 +1119,7 @@ export function useSync(onNotesChanged: () => void) {
                   await updateTombstoneDelivery(
                     pending.tombstone,
                     { pairingId: pairing.id, peerId },
-                    'accepted'
+                    msg.outcome === 'superseded' ? 'superseded' : 'accepted'
                   );
                   return;
                 }

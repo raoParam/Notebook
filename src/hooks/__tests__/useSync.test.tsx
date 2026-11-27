@@ -2617,12 +2617,12 @@ describe('useSync deletion tombstones', () => {
       expect(deviceDb.tombstonesMap.has('n-conflict')).toBe(false);
 
       // A newer deletion after that note still wins
-      const removed = await applyRemoteTombstone({
+      const result = await applyRemoteTombstone({
         noteId: 'n-conflict',
         deletedAt: '2026-05-01T00:00:00.000Z',
         deletionId: 'del-may',
       });
-      expect(removed).toBe(true);
+      expect(result).toEqual({ outcome: 'applied', removedNote: true });
       expect(deviceDb.notesMap.has('n-conflict')).toBe(false);
       expect(deviceDb.tombstonesMap.get('n-conflict')).toMatchObject({
         deletionId: 'del-may',
@@ -2667,7 +2667,7 @@ describe('useSync deletion tombstones', () => {
           deletedAt: '2026-03-01T00:00:00.000Z',
           deletionId: 'd-older',
         })
-      ).toBe(false);
+      ).toEqual({ outcome: 'superseded', removedNote: false });
       expect(dbWithNote.notesMap.has(note.id)).toBe(true);
       expect(dbWithNote.tombstonesMap.has(note.id)).toBe(false);
 
@@ -2677,7 +2677,7 @@ describe('useSync deletion tombstones', () => {
           deletedAt: '2026-04-01T00:00:00.000Z',
           deletionId: 'd-newer',
         })
-      ).toBe(true);
+      ).toEqual({ outcome: 'applied', removedNote: true });
       expect(dbWithNote.notesMap.has(note.id)).toBe(false);
       expect(dbWithNote.tombstonesMap.get(note.id)?.deletionId).toBe('d-newer');
     });
@@ -2968,5 +2968,111 @@ describe('useSync deletion tombstones', () => {
       scope: 'propagated',
       deliveryFailures: 1,
     });
+  });
+
+  // ── Batch 4A.2: Tombstone ACK outcome semantics ────────────────────────────
+
+  it('distinguishes applied tombstone ACKs from stale deletions superseded by a newer note', async () => {
+    const noteOnA = await makeNote('ack-outcome-1', 'Note', 'Older A', '2026-03-01T00:00:00.000Z');
+    const newerNoteOnB = await makeNote('ack-outcome-1', 'Note', 'Newer B', '2026-06-01T00:00:00.000Z');
+    const olderNoteOnC = await makeNote('ack-outcome-1', 'Note', 'Older C', '2026-02-01T00:00:00.000Z');
+
+    // Case 1: Single peer has a newer note -> receiver replies outcome: 'superseded',
+    // sender records status: 'superseded', deliveryFailures: 0, and keeps scope: 'local'.
+    const dbA1 = createMockDb([noteOnA], [pairing]);
+    const dbB1 = createMockDb([newerNoteOnB], [pairing]);
+    const mountA1 = await mountSyncHook('device-A', dbA1);
+    const mountB1 = await mountSyncHook('device-B', dbB1);
+    cleanups.push(mountA1.unmount, mountB1.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA1, 'device-B': dbB1 });
+
+    // Create a local tombstone with deletedAt strictly before newerNoteOnB (2026-04-01 < 2026-06-01)
+    const staleTombstone: Tombstone = {
+      noteId: noteOnA.id,
+      deletedAt: '2026-04-01T00:00:00.000Z',
+      deletionId: 'del-stale-vs-b',
+      scope: 'local',
+      deliveryFailures: 0,
+    };
+    dbA1.notesMap.delete(noteOnA.id);
+    dbA1.tombstonesMap.set(noteOnA.id, staleTombstone);
+
+    await act(async () => {
+      await dbContext.run(dbA1, () => mountA1.api().propagateDeletion(staleTombstone));
+    });
+    await flushAsyncTicks();
+
+    const ackFromB = network.sentMessages.find(
+      (m) => (m.data as { type?: string }).type === 'tombstone-ack'
+    )?.data as { type: string; outcome?: string } | undefined;
+    expect(ackFromB?.outcome).toBe('superseded');
+    expect(dbB1.notesMap.get(noteOnA.id)?.content).toBe('Newer B');
+    expect(dbB1.tombstonesMap.has(noteOnA.id)).toBe(false);
+    expect(
+      dbA1.deletionDeliveriesMap.get(
+        deletionDeliveryKey(staleTombstone.deletionId, pairing.id, 'device-B')
+      )?.status
+    ).toBe('superseded');
+    expect(dbA1.tombstonesMap.get(noteOnA.id)).toMatchObject({
+      scope: 'local',
+      deliveryFailures: 0,
+    });
+
+    // Case 2: Multi-peer where B supersedes and C applies -> preserves both outcomes
+    resetNetwork();
+    const pairing2: Pairing = { id: 'room-deletion-02', label: 'Peer C', pairedAt: '2026-01-01T00:00:00.000Z' };
+    const dbA2 = createMockDb([], [pairing, pairing2]);
+    const dbB2 = createMockDb([newerNoteOnB], [pairing]);
+    const dbC2 = createMockDb([olderNoteOnC], [pairing2]);
+    const mixedTombstone: Tombstone = {
+      noteId: noteOnA.id,
+      deletedAt: '2026-04-01T00:00:00.000Z',
+      deletionId: 'del-mixed-outcomes',
+      scope: 'local',
+      deliveryFailures: 0,
+    };
+    dbA2.tombstonesMap.set(noteOnA.id, mixedTombstone);
+
+    const mountA2 = await mountSyncHook('device-A', dbA2);
+    const mountB2 = await mountSyncHook('device-B', dbB2);
+    const mountC2 = await mountSyncHook('device-C', dbC2);
+    cleanups.push(mountA2.unmount, mountB2.unmount, mountC2.unmount);
+    setupPerDeviceRouting({ 'device-A': dbA2, 'device-B': dbB2, 'device-C': dbC2 });
+
+    await act(async () => {
+      await dbContext.run(dbA2, () => mountA2.api().propagateDeletion(mixedTombstone));
+    });
+    await flushAsyncTicks();
+
+    const ackB2 = network.sentMessages.find(
+      (m) =>
+        m.fromDevice === 'device-B' &&
+        (m.data as { type?: string }).type === 'tombstone-ack'
+    )?.data as { outcome?: string } | undefined;
+    const ackC2 = network.sentMessages.find(
+      (m) =>
+        m.fromDevice === 'device-C' &&
+        (m.data as { type?: string }).type === 'tombstone-ack'
+    )?.data as { outcome?: string } | undefined;
+
+    expect(ackB2?.outcome).toBe('superseded');
+    expect(ackC2?.outcome).toBe('applied');
+    expect(
+      dbA2.deletionDeliveriesMap.get(
+        deletionDeliveryKey(mixedTombstone.deletionId, pairing.id, 'device-B')
+      )?.status
+    ).toBe('superseded');
+    expect(
+      dbA2.deletionDeliveriesMap.get(
+        deletionDeliveryKey(mixedTombstone.deletionId, pairing2.id, 'device-C')
+      )?.status
+    ).toBe('accepted');
+    expect(dbA2.tombstonesMap.get(noteOnA.id)).toMatchObject({
+      scope: 'propagated',
+      deliveryFailures: 0,
+    });
+    expect(dbB2.notesMap.get(noteOnA.id)?.content).toBe('Newer B');
+    expect(dbC2.notesMap.has(noteOnA.id)).toBe(false);
+    expect(dbC2.tombstonesMap.get(noteOnA.id)?.scope).toBe('propagated');
   });
 });

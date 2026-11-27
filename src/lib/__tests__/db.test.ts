@@ -1,7 +1,11 @@
 import 'fake-indexeddb/auto';
 import Dexie from 'dexie';
 import { afterEach, describe, expect, it } from 'vitest';
-import { deleteNoteWithTombstone, updateTombstoneDelivery } from '@/lib/tombstones';
+import {
+  deleteNoteWithTombstone,
+  updateNoteSafely,
+  updateTombstoneDelivery,
+} from '@/lib/tombstones';
 import { db, NotebookDB, seedIfEmpty } from '@/lib/db';
 
 describe('NotebookDB schema migration', () => {
@@ -177,5 +181,34 @@ describe('NotebookDB schema migration', () => {
 
     expect(await db.notes.get('welcome-note-default-id')).toBeUndefined();
     db.close();
+  });
+
+  it('prevents concurrent note updates from resurrecting deleted notes inside IndexedDB transactions', async () => {
+    const database = new NotebookDB();
+    await database.open();
+    await database.notes.put({
+      id: 'race-note',
+      title: 'Race Note',
+      content: 'Initial',
+      attachments: {},
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-02T00:00:00.000Z',
+      contentHash: 'initial-hash',
+    });
+
+    const [updateResult, tombstone] = await Promise.all([
+      updateNoteSafely('race-note', { content: 'Delayed save' }, database),
+      deleteNoteWithTombstone('race-note', database),
+    ]);
+
+    expect(tombstone).not.toBeNull();
+    expect(['saved', 'missing', 'deleted']).toContain(updateResult.status);
+    expect(await database.notes.get('race-note')).toBeUndefined();
+    expect(await database.tombstones.get('race-note')).toEqual(tombstone);
+
+    const lateSave = await updateNoteSafely('race-note', { content: 'Too late' }, database);
+    expect(lateSave).toEqual({ status: 'missing' });
+    expect(await database.notes.get('race-note')).toBeUndefined();
+    database.close();
   });
 });

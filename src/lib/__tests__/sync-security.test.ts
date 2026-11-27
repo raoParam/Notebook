@@ -180,6 +180,32 @@ describe('parseSyncMessage', () => {
         deletionId: 'delete-1',
       })
     ).toEqual({ type: 'tombstone-ack', noteId: 'n1', deletionId: 'delete-1' });
+    expect(
+      parseSyncMessage({
+        type: 'tombstone-ack',
+        noteId: 'n1',
+        deletionId: 'delete-1',
+        outcome: 'applied',
+      })
+    ).toEqual({
+      type: 'tombstone-ack',
+      noteId: 'n1',
+      deletionId: 'delete-1',
+      outcome: 'applied',
+    });
+    expect(
+      parseSyncMessage({
+        type: 'tombstone-ack',
+        noteId: 'n1',
+        deletionId: 'delete-1',
+        outcome: 'superseded',
+      })
+    ).toEqual({
+      type: 'tombstone-ack',
+      noteId: 'n1',
+      deletionId: 'delete-1',
+      outcome: 'superseded',
+    });
   });
 
   it('rejects invalid ack, note-error, and invalid session/transfer metadata fields', () => {
@@ -234,6 +260,14 @@ describe('parseSyncMessage', () => {
     ).toBeNull();
     expect(
       parseSyncMessage({ type: 'tombstone-ack', noteId: 'n1', deletionId: '' })
+    ).toBeNull();
+    expect(
+      parseSyncMessage({
+        type: 'tombstone-ack',
+        noteId: 'n1',
+        deletionId: 'delete-1',
+        outcome: 'unknown',
+      })
     ).toBeNull();
   });
 

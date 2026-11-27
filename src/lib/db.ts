@@ -32,7 +32,7 @@ export interface Tombstone {
   deliveryFailures: number;
 }
 
-export type DeletionDeliveryStatus = 'pending' | 'accepted' | 'failed';
+export type DeletionDeliveryStatus = 'pending' | 'accepted' | 'failed' | 'superseded';
 
 export interface DeletionRecipient {
   pairingId: string;

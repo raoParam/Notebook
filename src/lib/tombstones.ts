@@ -6,9 +6,18 @@ import {
   type NotebookDB,
   type Tombstone,
 } from './db';
+import { computeContentHash } from './hash';
 
 export type RemoteTombstone = Pick<Tombstone, 'noteId' | 'deletedAt' | 'deletionId'>;
 export type IncomingNoteResult = 'stored' | 'unchanged' | 'blocked' | 'inactive';
+export type ApplyTombstoneResult = {
+  outcome: 'applied' | 'superseded' | 'invalid';
+  removedNote: boolean;
+};
+export type LocalNoteUpdateResult =
+  | { status: 'saved'; note: Note }
+  | { status: 'missing' }
+  | { status: 'deleted' };
 
 export function deletionDeliveryKey(
   deletionId: string,
@@ -148,10 +157,10 @@ export async function prepareDeletionDeliveries(
 export async function applyRemoteTombstone(
   incoming: RemoteTombstone,
   database: NotebookDB = db
-): Promise<boolean> {
+): Promise<ApplyTombstoneResult> {
   const incomingTime = Date.parse(incoming.deletedAt);
   if (!Number.isFinite(incomingTime)) {
-    return false;
+    return { outcome: 'invalid', removedNote: false };
   }
 
   return database.transaction(
@@ -195,7 +204,7 @@ export async function applyRemoteTombstone(
           await database.tombstones.delete(incoming.noteId);
           await deleteDeliveriesForNoteOrDeletion(database, incoming.noteId, current.deletionId);
         }
-        return false;
+        return { outcome: 'superseded', removedNote: false };
       }
 
       if (current && current.deletionId !== effective.deletionId) {
@@ -206,9 +215,9 @@ export async function applyRemoteTombstone(
 
       if (note && (!Number.isFinite(noteTime) || noteTime <= effectiveTime)) {
         await database.notes.delete(incoming.noteId);
-        return true;
+        return { outcome: 'applied', removedNote: true };
       }
-      return false;
+      return { outcome: 'applied', removedNote: false };
     }
   );
 }
@@ -260,10 +269,96 @@ export async function persistIncomingNote(
   );
 }
 
+function areAttachmentsEqual(
+  a: Note['attachments'],
+  b: Note['attachments']
+): boolean {
+  if (a === b) return true;
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const key of keysA) {
+    const entryA = a[key];
+    const entryB = b[key];
+    if (
+      !entryB ||
+      entryA.name !== entryB.name ||
+      entryA.data !== entryB.data ||
+      entryA.createdAt !== entryB.createdAt
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export async function updateNoteSafely(
+  noteId: string,
+  patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>,
+  database: NotebookDB = db
+): Promise<LocalNoteUpdateResult> {
+  // Precompute contentHash outside the IndexedDB rw transaction because SubtleCrypto
+  // awaits would otherwise cause IndexedDB transactions to auto-commit in browsers.
+  while (true) {
+    const snapshot = await database.notes.get(noteId);
+    if (!snapshot) return { status: 'missing' };
+
+    const snapshotTombstone = await database.tombstones.get(noteId);
+    if (snapshotTombstone) return { status: 'deleted' };
+
+    const candidateContent = patch.content ?? snapshot.content;
+    const candidateAttachments = patch.attachments ?? snapshot.attachments;
+    const candidateHash = await computeContentHash(candidateContent, candidateAttachments);
+
+    const txResult = await database.transaction(
+      'rw',
+      database.notes,
+      database.tombstones,
+      async () => {
+        const current = await database.notes.get(noteId);
+        if (!current) return { status: 'missing' as const };
+
+        const tombstone = await database.tombstones.get(noteId);
+        if (tombstone) return { status: 'deleted' as const };
+
+        const finalContent = patch.content ?? current.content;
+        const finalAttachments = patch.attachments ?? current.attachments;
+        if (
+          finalContent !== candidateContent ||
+          !areAttachmentsEqual(finalAttachments, candidateAttachments)
+        ) {
+          return { status: 'retry' as const };
+        }
+
+        const currentTime = Date.parse(current.updatedAt);
+        const nowMs = Date.now();
+        const updatedAt = new Date(
+          Number.isFinite(currentTime) ? Math.max(nowMs, currentTime + 1) : nowMs
+        ).toISOString();
+
+        const next: Note = {
+          ...current,
+          ...patch,
+          content: finalContent,
+          attachments: finalAttachments,
+          updatedAt,
+          contentHash: candidateHash,
+        };
+        await database.notes.put(next);
+        return { status: 'saved' as const, note: next };
+      }
+    );
+
+    if (txResult.status !== 'retry') {
+      return txResult;
+    }
+  }
+}
+
 export async function updateTombstoneDelivery(
   tombstone: Tombstone,
   recipient: DeletionRecipient,
-  result: 'accepted' | 'failed',
+  result: 'accepted' | 'failed' | 'superseded',
   database: NotebookDB = db
 ): Promise<void> {
   await database.transaction(
