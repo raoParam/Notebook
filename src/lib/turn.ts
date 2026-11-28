@@ -3,7 +3,8 @@
  *
  * Fetches sanitized TURN/STUN server configuration from the app's server-side
  * `/api/ice-servers` endpoint, coalesces concurrent in-flight requests, and
- * caches valid responses in memory for 10 minutes.
+ * caches valid responses in memory for up to 10 minutes (bounded by the server's
+ * `X-Ice-Servers-TTL` remaining credential lifetime header).
  * Falls back to public Google STUN servers if the endpoint is unavailable, times out,
  * returns invalid data, or cannot be reached via relative URL (e.g. during SSR).
  */
@@ -33,11 +34,38 @@ const ICE_URI_PATTERN =
   /^(?:stuns?|turns?):(?:\[[0-9a-f:]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::(\d{1,5}))?(?:\?transport=(?:udp|tcp))?$/i;
 
 const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MIN_CLIENT_CACHE_TTL_MS = 10 * 1000; // Do not cache credentials with < 10s remaining lifetime
 const CLIENT_FETCH_TIMEOUT_MS = 8_000;
+
+/**
+ * Response header used by `/api/ice-servers` to communicate remaining credential
+ * validity in integer seconds while preserving `Cache-Control: no-store`.
+ */
+export const ICE_SERVERS_TTL_HEADER = 'X-Ice-Servers-TTL';
 
 let cachedServers: IceServer[] | null = null;
 let cacheExpiry = 0;
 let inFlightRequest: Promise<IceServer[]> | null = null;
+
+function resolveClientCacheTtlMs(res: Response): number {
+  const rawHeader = res.headers?.get?.(ICE_SERVERS_TTL_HEADER);
+  if (rawHeader === null || rawHeader === undefined) {
+    return CACHE_TTL_MS;
+  }
+
+  const trimmed = rawHeader.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return 0;
+  }
+
+  const ttlSeconds = Number(trimmed);
+  if (!Number.isFinite(ttlSeconds) || ttlSeconds <= 0) {
+    return 0;
+  }
+
+  const ttlMs = Math.min(CACHE_TTL_MS, ttlSeconds * 1000);
+  return ttlMs >= MIN_CLIENT_CACHE_TTL_MS ? ttlMs : 0;
+}
 
 function isValidIceUri(value: unknown): value is string {
   if (
@@ -300,10 +328,16 @@ export async function getIceServers(): Promise<IceServer[]> {
         return FALLBACK_ICE_SERVERS;
       }
 
-      cachedServers = servers;
-      cacheExpiry = Date.now() + CACHE_TTL_MS;
+      const ttlMs = resolveClientCacheTtlMs(res);
+      if (ttlMs > 0) {
+        cachedServers = servers;
+        cacheExpiry = Date.now() + ttlMs;
+      } else {
+        cachedServers = null;
+        cacheExpiry = 0;
+      }
 
-      return cachedServers;
+      return servers;
     } catch (err) {
       const rawName = err instanceof Error ? err.name : 'UnknownError';
       const safeName = /^[A-Za-z0-9_.-]{1,64}$/.test(rawName) ? rawName : 'Error';

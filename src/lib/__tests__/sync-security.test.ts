@@ -11,6 +11,7 @@ import {
   MAX_REQUEST_NOTE_IDS,
   classifyPeerNotes,
   compressNote,
+  computeDiff,
   computeManifestDigest,
   countUnchangedNotes,
   decompressNote,
@@ -1016,5 +1017,101 @@ describe('timestamp trust policy and far-future protection', () => {
     expect(byId.get('new-far-future')?.relation).toBe('conflict');
     expect(byId.get('same-note')?.relation).toBe('identical');
     expect(byId.get('legit-skew-new')?.relation).toBe('new');
+  });
+
+  it('keeps valid manifest entries usable when mixed with far-future or malformed timestamp entries', () => {
+    const validOld = new Date(now - 120_000).toISOString();
+    const validNew = new Date(now - 30_000).toISOString();
+    const validSkew = new Date(now + 60_000).toISOString();
+    const farFuture = new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 60_000).toISOString();
+
+    const local = [
+      { noteId: 'n-updated', contentHash: 'h-local-old', updatedAt: validOld },
+      { noteId: 'n-same', contentHash: 'h-same', updatedAt: validOld },
+      { noteId: 'n-far-future-conflict', contentHash: 'h-local', updatedAt: validOld },
+    ];
+
+    const mixedFarFuture = parseSyncMessage(
+      {
+        type: 'manifest',
+        sessionId: 'sess-mixed-future',
+        entries: [
+          { noteId: 'n-updated', title: 'Updated', contentHash: 'h-peer-new', updatedAt: validNew },
+          { noteId: 'n-new', title: 'New Note', contentHash: 'h-new', updatedAt: validSkew },
+          { noteId: 'n-same', title: 'Same', contentHash: 'h-same', updatedAt: validOld },
+          { noteId: 'n-far-future-conflict', title: 'Evil', contentHash: 'h-evil', updatedAt: farFuture },
+          { noteId: 'n-far-future-new', title: 'Evil New', contentHash: 'h-evil-new', updatedAt: '9999-12-31T23:59:59.999Z' },
+        ],
+      },
+      now
+    );
+
+    expect(mixedFarFuture).toEqual({
+      type: 'manifest',
+      sessionId: 'sess-mixed-future',
+      entries: [
+        { noteId: 'n-updated', title: 'Updated', contentHash: 'h-peer-new', updatedAt: validNew },
+        { noteId: 'n-new', title: 'New Note', contentHash: 'h-new', updatedAt: validSkew },
+        { noteId: 'n-same', title: 'Same', contentHash: 'h-same', updatedAt: validOld },
+      ],
+    });
+
+    if (!mixedFarFuture || mixedFarFuture.type !== 'manifest') {
+      throw new Error('Expected parsed manifest');
+    }
+
+    expect(computeDiff(local, mixedFarFuture.entries, now)).toEqual(['n-updated', 'n-new']);
+    const previews = classifyPeerNotes(local, mixedFarFuture.entries, now);
+    expect(previews.map((p) => [p.noteId, p.relation])).toEqual([
+      ['n-updated', 'updated'],
+      ['n-new', 'new'],
+      ['n-same', 'identical'],
+    ]);
+
+    const mixedMalformed = parseSyncMessage(
+      {
+        type: 'manifest',
+        entries: [
+          { noteId: 'n-updated', contentHash: 'h-peer-new', updatedAt: validNew },
+          { noteId: 'n-bad-string', contentHash: 'h-bad1', updatedAt: 'not-a-date' },
+          { noteId: 'n-bad-calendar', contentHash: 'h-bad2', updatedAt: '2026-02-30T00:00:00.000Z' },
+          { noteId: 'n-bad-dateonly', contentHash: 'h-bad3', updatedAt: '2026-01-01' },
+        ],
+      },
+      now
+    );
+
+    expect(mixedMalformed).toEqual({
+      type: 'manifest',
+      entries: [{ noteId: 'n-updated', contentHash: 'h-peer-new', updatedAt: validNew }],
+    });
+    if (!mixedMalformed || mixedMalformed.type !== 'manifest') {
+      throw new Error('Expected parsed manifest');
+    }
+    expect(computeDiff(local, mixedMalformed.entries, now)).toEqual(['n-updated']);
+
+    // Manifest containing only invalid entries does not allow unsafe transfers
+    expect(
+      parseSyncMessage(
+        {
+          type: 'manifest',
+          entries: [
+            { noteId: 'n-far-future', contentHash: 'h1', updatedAt: farFuture },
+            { noteId: 'n-malformed', contentHash: 'h2', updatedAt: 'not-a-date' },
+          ],
+        },
+        now
+      )
+    ).toBeNull();
+    expect(
+      computeDiff(
+        local,
+        [
+          { noteId: 'n-far-future-conflict', contentHash: 'h-evil', updatedAt: farFuture },
+          { noteId: 'n-malformed', contentHash: 'h-bad', updatedAt: 'not-a-date' },
+        ],
+        now
+      )
+    ).toEqual([]);
   });
 });

@@ -349,7 +349,6 @@ export function parseSyncMessage(
         if (!isPlainObject(item)) return null;
         if (!isValidNoteId(item.noteId)) return null;
         if (!isValidHash(item.contentHash, false)) return null;
-        if (!isTrustedTimestamp(item.updatedAt, nowMs)) return null;
         if (
           item.title !== undefined &&
           (typeof item.title !== 'string' ||
@@ -358,12 +357,20 @@ export function parseSyncMessage(
         ) {
           return null;
         }
+        // Skip individual entries with invalid or far-future timestamps so one
+        // problematic note never blocks unrelated valid notes from syncing.
+        if (!isTrustedTimestamp(item.updatedAt, nowMs)) {
+          continue;
+        }
         entries.push({
           noteId: item.noteId,
           contentHash: item.contentHash,
           updatedAt: item.updatedAt,
           ...(item.title !== undefined ? { title: item.title } : {}),
         });
+      }
+      if (data.entries.length > 0 && entries.length === 0) {
+        return null;
       }
       return {
         type: 'manifest',

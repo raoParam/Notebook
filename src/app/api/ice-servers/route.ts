@@ -40,6 +40,7 @@
 import { NextResponse } from 'next/server';
 import {
   FALLBACK_ICE_SERVERS,
+  ICE_SERVERS_TTL_HEADER,
   readBoundedJson,
   sanitizeIceServers,
   type IceServer,
@@ -50,20 +51,28 @@ export const dynamic = 'force-dynamic';
 const METERED_APP_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 const CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F]/;
 const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MIN_CACHE_TTL_MS = 10 * 1000; // Do not cache credentials with < 10s remaining buffered lifetime
 const CACHE_EXPIRY_BUFFER_MS = 30 * 1000; // Refresh before upstream credential TTL expires
 const UPSTREAM_TIMEOUT_MS = 5_000;
+
+interface CachedIceServersResult {
+  servers: IceServer[];
+  ttlMs: number;
+}
 
 let cachedServers: IceServer[] | null = null;
 let cachedAppName: string | null = null;
 let cacheExpiry = 0;
-let inFlightFetch: { appName: string; promise: Promise<IceServer[]> } | null = null;
+let inFlightFetch: { appName: string; promise: Promise<CachedIceServersResult> } | null = null;
 
-function jsonNoStore(servers: IceServer[]): NextResponse<IceServer[]> {
+function jsonNoStore(servers: IceServer[], ttlMs = 0): NextResponse<IceServer[]> {
+  const ttlSeconds = Math.max(0, Math.floor(ttlMs / 1000));
   return NextResponse.json(servers, {
     status: 200,
     headers: {
       'Cache-Control': 'no-store',
       'X-Content-Type-Options': 'nosniff',
+      [ICE_SERVERS_TTL_HEADER]: String(ttlSeconds),
       Vary: 'Sec-Fetch-Site',
     },
   });
@@ -83,7 +92,10 @@ function resolveCacheTtlMs(payload: unknown): number {
       Object.hasOwn(item, 'ttl')
     ) {
       const rawTtl = (item as Record<string, unknown>).ttl;
-      if (typeof rawTtl === 'number' && Number.isFinite(rawTtl) && rawTtl > 0) {
+      if (typeof rawTtl === 'number' && Number.isFinite(rawTtl)) {
+        if (rawTtl <= 0) {
+          return 0;
+        }
         minUpstreamTtlSeconds =
           minUpstreamTtlSeconds === null ? rawTtl : Math.min(minUpstreamTtlSeconds, rawTtl);
       }
@@ -95,7 +107,7 @@ function resolveCacheTtlMs(payload: unknown): number {
   }
 
   const bufferedMs = minUpstreamTtlSeconds * 1000 - CACHE_EXPIRY_BUFFER_MS;
-  if (bufferedMs <= 0) {
+  if (bufferedMs < MIN_CACHE_TTL_MS) {
     return 0;
   }
 
@@ -121,7 +133,10 @@ function appendUniqueFallbacks(validServers: IceServer[]): IceServer[] {
   return [...validServers, ...extraFallbacks];
 }
 
-async function fetchUpstreamIceServers(appName: string, apiKey: string): Promise<IceServer[]> {
+async function fetchUpstreamIceServers(
+  appName: string,
+  apiKey: string,
+): Promise<CachedIceServersResult> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
@@ -140,7 +155,7 @@ async function fetchUpstreamIceServers(appName: string, apiKey: string): Promise
     if (!res.ok) {
       void res.body?.cancel?.().catch(() => {});
       console.error(`[ice-servers] TURN provider responded with status ${res.status}`);
-      return FALLBACK_ICE_SERVERS;
+      return { servers: FALLBACK_ICE_SERVERS, ttlMs: 0 };
     }
 
     const payload = await readBoundedJson(res, controller.signal);
@@ -148,7 +163,7 @@ async function fetchUpstreamIceServers(appName: string, apiKey: string): Promise
 
     if (validServers.length === 0) {
       console.warn('[ice-servers] Invalid TURN provider response, falling back to STUN-only');
-      return FALLBACK_ICE_SERVERS;
+      return { servers: FALLBACK_ICE_SERVERS, ttlMs: 0 };
     }
 
     const servers = appendUniqueFallbacks(validServers);
@@ -158,15 +173,19 @@ async function fetchUpstreamIceServers(appName: string, apiKey: string): Promise
       cachedServers = servers;
       cachedAppName = appName;
       cacheExpiry = Date.now() + ttlMs;
+    } else {
+      cachedServers = null;
+      cachedAppName = null;
+      cacheExpiry = 0;
     }
 
-    return servers;
+    return { servers, ttlMs };
   } catch (err) {
     // Log only a sanitized error name so upstream URLs containing apiKey are never emitted to logs.
     const rawName = err instanceof Error ? err.name : 'UnknownError';
     const safeName = /^[A-Za-z0-9_.-]{1,64}$/.test(rawName) ? rawName : 'Error';
     console.error(`[ice-servers] Failed to fetch TURN credentials (${safeName})`);
-    return FALLBACK_ICE_SERVERS;
+    return { servers: FALLBACK_ICE_SERVERS, ttlMs: 0 };
   } finally {
     clearTimeout(timeoutId);
   }
@@ -193,26 +212,27 @@ export async function GET(request?: Request): Promise<NextResponse<IceServer[] |
 
   if (!appName || !apiKey) {
     console.warn('[ice-servers] TURN credentials not configured, falling back to STUN-only');
-    return jsonNoStore(FALLBACK_ICE_SERVERS);
+    return jsonNoStore(FALLBACK_ICE_SERVERS, 0);
   }
 
   if (!METERED_APP_NAME_PATTERN.test(appName) || CONTROL_CHARS_PATTERN.test(apiKey)) {
     console.warn('[ice-servers] Invalid Metered configuration format, falling back to STUN-only');
-    return jsonNoStore(FALLBACK_ICE_SERVERS);
+    return jsonNoStore(FALLBACK_ICE_SERVERS, 0);
   }
 
   if (cachedServers && cachedAppName === appName && Date.now() < cacheExpiry) {
-    return jsonNoStore(cachedServers);
+    const remainingMs = Math.max(0, cacheExpiry - Date.now());
+    return jsonNoStore(cachedServers, remainingMs);
   }
 
   if (typeof fetch !== 'function') {
     console.warn('[ice-servers] Global fetch unavailable, falling back to STUN-only');
-    return jsonNoStore(FALLBACK_ICE_SERVERS);
+    return jsonNoStore(FALLBACK_ICE_SERVERS, 0);
   }
 
   if (inFlightFetch && inFlightFetch.appName === appName) {
-    const servers = await inFlightFetch.promise;
-    return jsonNoStore(servers);
+    const result = await inFlightFetch.promise;
+    return jsonNoStore(result.servers, result.ttlMs);
   }
 
   const promise = fetchUpstreamIceServers(appName, apiKey).finally(() => {
@@ -222,6 +242,6 @@ export async function GET(request?: Request): Promise<NextResponse<IceServer[] |
   });
   inFlightFetch = { appName, promise };
 
-  const servers = await promise;
-  return jsonNoStore(servers);
+  const result = await promise;
+  return jsonNoStore(result.servers, result.ttlMs);
 }

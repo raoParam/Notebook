@@ -802,4 +802,255 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
     const { FALLBACK_ICE_SERVERS: ssrFallback, getIceServers: getIceServersSsr } = await import('../turn');
     expect(await getIceServersSsr()).toEqual(ssrFallback);
   });
+
+  it('respects 5-minute upstream credential TTL end-to-end and propagates remaining lifetime on warm cache hits', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    const secretKey = 'secret-5m-ttl-key';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    let callCount = 0;
+    const originalFetch = globalThis.fetch;
+    const routeModule = await import('../../app/api/ice-servers/route');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (input === '/api/ice-servers') {
+        return routeModule.GET(new Request('https://notebook.example.com/api/ice-servers', init));
+      }
+      callCount++;
+      return new Response(
+        JSON.stringify([
+          {
+            urls: 'turn:5m.example.com:3478',
+            username: `u-${callCount}`,
+            credential: `c-${callCount}`,
+            ttl: 300,
+          },
+        ]),
+        { status: 200 },
+      );
+    });
+
+    expect(typeof originalFetch).toBe('function');
+
+    // Direct route response exposes remaining buffered TTL (300s - 30s = 270s) with Cache-Control: no-store
+    const routeRes = await routeModule.GET();
+    expect(routeRes.headers.get('cache-control')).toBe('no-store');
+    expect(routeRes.headers.get('x-ice-servers-ttl')).toBe('270');
+
+    // Advance 200s -> warm server cache has 70s remaining; fresh client only caches for 70s
+    await vi.advanceTimersByTimeAsync(200 * 1000);
+    const { getIceServers } = await import('../turn');
+
+    const first = await getIceServers();
+    expect(first[0]?.username).toBe('u-1');
+    const clientFetchesAfterFirst = fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length;
+    expect(clientFetchesAfterFirst).toBe(1);
+
+    // At +60s (260s elapsed total), client cache (70s) is still valid
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    const second = await getIceServers();
+    expect(second[0]?.username).toBe('u-1');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(1);
+
+    // At +15s more (275s elapsed total), both client and server caches expired -> refreshes cleanly
+    await vi.advanceTimersByTimeAsync(15 * 1000);
+    const third = await getIceServers();
+    expect(third[0]?.username).toBe('u-2');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(2);
+    expect(JSON.stringify(third)).not.toContain(secretKey);
+
+    // Advance 265s into the 270s cache -> warm server has 5s remaining (< 10s threshold),
+    // so a fresh client gets live servers with X-Ice-Servers-TTL: 5 and does not cache them.
+    await vi.advanceTimersByTimeAsync(265 * 1000);
+    vi.resetModules();
+    const { getIceServers: getFreshClientIceServers } = await import('../turn');
+    const nearExpiryRes = await getFreshClientIceServers();
+    expect(nearExpiryRes[0]?.username).toBe('u-2');
+
+    // 6s later (271s total) -> server cache expired and fresh client did not cache the 5s response
+    await vi.advanceTimersByTimeAsync(6 * 1000);
+    const refreshedAfterNearExpiry = await getFreshClientIceServers();
+    expect(refreshedAfterNearExpiry[0]?.username).toBe('u-3');
+  });
+
+  it('caps 15-minute upstream credential TTL at 10 minutes on server and client', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    let callCount = 0;
+    const routeModule = await import('../../app/api/ice-servers/route');
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (input === '/api/ice-servers') {
+        return routeModule.GET(new Request('https://notebook.example.com/api/ice-servers', init));
+      }
+      callCount++;
+      return new Response(
+        JSON.stringify([
+          {
+            urls: 'turn:15m.example.com:3478',
+            username: `u-${callCount}`,
+            credential: `c-${callCount}`,
+            ttl: 900,
+          },
+        ]),
+        { status: 200 },
+      );
+    });
+
+    const { getIceServers } = await import('../turn');
+
+    const first = await getIceServers();
+    expect(first[0]?.username).toBe('u-1');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(1);
+
+    // 9 minutes later -> still within 10-minute cap
+    await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+    const second = await getIceServers();
+    expect(second[0]?.username).toBe('u-1');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(1);
+
+    // 2 minutes later (11 minutes total) -> 10-minute client + server cache expired
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    const third = await getIceServers();
+    expect(third[0]?.username).toBe('u-2');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(2);
+  });
+
+  it('does not cache very short TTL credentials or degraded STUN fallback responses on the client', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    let upstreamIndex = 0;
+    const upstreamPayloads = [
+      // 1) ttl: 25s -> buffered <= 0 -> X-Ice-Servers-TTL: 0 (not cached)
+      [{ urls: 'turn:short25.example.com:3478', username: 'u-25', credential: 'c-25', ttl: 25 }],
+      // 2) ttl: 35s -> buffered 5s -> X-Ice-Servers-TTL: 5 (< 10s client minimum, not cached)
+      [{ urls: 'turn:short35.example.com:3478', username: 'u-35', credential: 'c-35', ttl: 35 }],
+      // 3) invalid upstream payload -> STUN fallback with X-Ice-Servers-TTL: 0 (not cached)
+      [{ urls: 'https://invalid.example.com' }],
+      // 4) healthy recovery with 5m TTL
+      [{ urls: 'turn:recovered.example.com:3478', username: 'u-ok', credential: 'c-ok', ttl: 300 }],
+    ];
+
+    const routeModule = await import('../../app/api/ice-servers/route');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (input === '/api/ice-servers') {
+        return routeModule.GET(new Request('https://notebook.example.com/api/ice-servers', init));
+      }
+      const payload = upstreamPayloads[upstreamIndex++] ?? upstreamPayloads[3];
+      return new Response(JSON.stringify(payload), { status: 200 });
+    });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { FALLBACK_ICE_SERVERS, getIceServers } = await import('../turn');
+
+    const res25 = await getIceServers();
+    expect(res25[0]?.username).toBe('u-25');
+
+    const res35 = await getIceServers();
+    expect(res35[0]?.username).toBe('u-35');
+
+    const resFallback = await getIceServers();
+    expect(resFallback).toEqual(FALLBACK_ICE_SERVERS);
+
+    const resRecovered = await getIceServers();
+    expect(resRecovered[0]?.username).toBe('u-ok');
+
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(4);
+  });
+
+  it('handles missing, zero, negative, and malformed TTLs safely on both server and client', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    // Server behavior: invalid string ttl falls back to 10m; explicit ttl <= 0 disables caching
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    const routeModule = await import('../../app/api/ice-servers/route');
+    const upstreamMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:zero.example.com:3478', username: 'u0', credential: 'c0', ttl: 0 }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:neg.example.com:3478', username: 'uneg', credential: 'cneg', ttl: -10 }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:badttl.example.com:3478', username: 'ubad', credential: 'cbad', ttl: 'invalid' }]),
+          { status: 200 },
+        ),
+      );
+
+    const zeroRes = await routeModule.GET();
+    expect(zeroRes.headers.get('cache-control')).toBe('no-store');
+    expect(zeroRes.headers.get('x-ice-servers-ttl')).toBe('0');
+
+    const negRes = await routeModule.GET();
+    expect(negRes.headers.get('x-ice-servers-ttl')).toBe('0');
+
+    const invalidTtlRes = await routeModule.GET();
+    expect(invalidTtlRes.headers.get('x-ice-servers-ttl')).toBe('600');
+    expect(upstreamMock).toHaveBeenCalledTimes(3);
+
+    // Client behavior: malformed X-Ice-Servers-TTL headers never cache
+    vi.resetModules();
+    vi.restoreAllMocks();
+    const clientFetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:a.example.com:3478', username: 'u1', credential: 'c1' }]), {
+          status: 200,
+          headers: { 'x-ice-servers-ttl': 'not-a-number' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:b.example.com:3478', username: 'u2', credential: 'c2' }]), {
+          status: 200,
+          headers: { 'x-ice-servers-ttl': '-30' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:c.example.com:3478', username: 'u3', credential: 'c3' }]), {
+          status: 200,
+          headers: { 'x-ice-servers-ttl': '120' },
+        }),
+      );
+
+    const { getIceServers } = await import('../turn');
+
+    expect((await getIceServers())[0]?.username).toBe('u1');
+    expect((await getIceServers())[0]?.username).toBe('u2');
+    expect((await getIceServers())[0]?.username).toBe('u3');
+    // Cached for 120s now
+    expect((await getIceServers())[0]?.username).toBe('u3');
+    expect(clientFetchSpy).toHaveBeenCalledTimes(3);
+
+    await vi.advanceTimersByTimeAsync(121 * 1000);
+    clientFetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify([{ urls: 'turn:d.example.com:3478', username: 'u4', credential: 'c4' }]), {
+        status: 200,
+        headers: { 'x-ice-servers-ttl': '120' },
+      }),
+    );
+    expect((await getIceServers())[0]?.username).toBe('u4');
+    expect(clientFetchSpy).toHaveBeenCalledTimes(4);
+  });
 });
