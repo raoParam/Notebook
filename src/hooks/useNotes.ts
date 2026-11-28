@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { db, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { deleteNoteWithTombstone, updateNoteSafely } from '@/lib/tombstones';
@@ -29,6 +29,12 @@ export function useNotes() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [sortOrder, setSortOrder] = useState<SortOrder>('lastChange');
   const [isLoaded, setIsLoaded] = useState(false);
+  const activeIdRef = useRef<string | null>(null);
+
+  const updateActiveId = useCallback((id: string | null) => {
+    activeIdRef.current = id;
+    setActiveId(id);
+  }, []);
 
   const reload = useCallback(async () => {
     const all = await db.notes.toArray();
@@ -45,9 +51,9 @@ export function useNotes() {
       try {
         const lastId = localStorage.getItem('nb-active-id');
         if (lastId && all.some((n) => n.id === lastId)) {
-          setActiveId(lastId);
+          updateActiveId(lastId);
         } else if (all.length > 0) {
-          setActiveId(all[0].id);
+          updateActiveId(all[0].id);
         }
         const savedSort = localStorage.getItem('nb-sort');
         if (isSortOrder(savedSort)) setSortOrder(savedSort);
@@ -55,7 +61,7 @@ export function useNotes() {
 
       setIsLoaded(true);
     })();
-  }, []);
+  }, [updateActiveId]);
 
   const activeNote = useMemo(
     () => notes.find((n) => n.id === activeId) ?? null,
@@ -64,9 +70,9 @@ export function useNotes() {
   const sortedNotes = useMemo(() => sortNotes(notes, sortOrder), [notes, sortOrder]);
 
   const selectNote = useCallback((id: string) => {
-    setActiveId(id);
+    updateActiveId(id);
     try { localStorage.setItem('nb-active-id', id); } catch {}
-  }, []);
+  }, [updateActiveId]);
 
   const createAndSelectNote = useCallback(
     async (title: string, content: string) => {
@@ -84,11 +90,11 @@ export function useNotes() {
       };
       await db.notes.add(note);
       await reload();
-      setActiveId(note.id);
+      updateActiveId(note.id);
       try { localStorage.setItem('nb-active-id', note.id); } catch {}
       return note.id;
     },
-    [reload]
+    [reload, updateActiveId]
   );
 
   const addNote = useCallback(() => createAndSelectNote('', ''), [createAndSelectNote]);
@@ -97,16 +103,16 @@ export function useNotes() {
     async (id: string, recipients?: DeletionRecipient[]): Promise<Tombstone | null> => {
       const tombstone = await deleteNoteWithTombstone(id, db, recipients);
       if (!tombstone) return null;
-      const remaining = notes.filter((n) => n.id !== id);
-      setNotes((prev) => prev.filter((n) => n.id !== id));
-      if (activeId === id) {
-        const newActive = remaining.length > 0 ? remaining[0].id : null;
-        setActiveId(newActive);
+      const remaining = await db.notes.toArray();
+      setNotes(remaining);
+      if (activeIdRef.current === id) {
+        const newActive = remaining[0]?.id ?? null;
+        updateActiveId(newActive);
         try { localStorage.setItem('nb-active-id', newActive ?? ''); } catch {}
       }
       return tombstone;
     },
-    [activeId, notes]
+    [updateActiveId]
   );
 
   const updateNote = useCallback(

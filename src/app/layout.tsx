@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from 'next';
+import 'katex/dist/katex.min.css';
 import './globals.css';
 import { ThemeProvider } from '@/components/ThemeProvider';
 
@@ -27,11 +28,6 @@ export default function RootLayout({
       <head>
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link
-          rel="stylesheet"
-          href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css"
-          crossOrigin="anonymous"
-        />
         <script
           dangerouslySetInnerHTML={{
             __html: `

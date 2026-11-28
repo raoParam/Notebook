@@ -190,4 +190,45 @@ describe('useNotes local save/delete race protection', () => {
     expect(await db.tombstones.get(noteId)).toBeUndefined();
     expect(mounted.api().notes.find((n) => n.id === noteId)?.content).toBe('Original body');
   });
+
+  it('prevents active-selection race when switching selection during deletion', async () => {
+    const mounted = await mountUseNotes();
+    cleanups.push(mounted.unmount);
+
+    let noteA = '';
+    let noteB = '';
+    let noteC = '';
+    await act(async () => {
+      noteA = await mounted.api().addNote();
+    });
+    await act(async () => {
+      noteB = await mounted.api().addNote();
+    });
+    await act(async () => {
+      noteC = await mounted.api().addNote();
+    });
+
+    // Start with noteA active
+    await act(async () => {
+      mounted.api().selectNote(noteA);
+    });
+    expect(mounted.api().activeNote?.id).toBe(noteA);
+
+    // Switch selection to noteC right as deleteNote(noteA) runs
+    // activeIdRef preserves noteC as the active note rather than clobbering it back to remaining[0]
+    await act(async () => {
+      mounted.api().selectNote(noteC);
+      await mounted.api().deleteNote(noteA);
+    });
+
+    expect(mounted.api().activeNote?.id).toBe(noteC);
+    expect(mounted.api().notes.some((n) => n.id === noteA)).toBe(false);
+
+    // When the currently active note (noteC) is deleted, selection correctly falls back to remaining[0]
+    await act(async () => {
+      await mounted.api().deleteNote(noteC);
+    });
+    expect(mounted.api().activeNote?.id).toBe(noteB);
+    expect(mounted.api().notes.some((n) => n.id === noteC)).toBe(false);
+  });
 });
