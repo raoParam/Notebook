@@ -8,8 +8,37 @@ import {
   type Tombstone,
 } from './db';
 import { computeContentHash } from './hash';
+import {
+  MAX_FUTURE_CLOCK_SKEW_MS,
+  hasTrustedNoteTimestamps,
+  parseStrictIsoTimestampMs,
+  parseTrustedTimestampMs,
+} from './sync';
 
 export const STALE_PENDING_DELIVERY_MS = 20_000;
+
+function resolveNowMs(now?: number): number {
+  return now !== undefined && Number.isFinite(now) ? now : Date.now();
+}
+
+/**
+ * Compute a monotonic local timestamp bounded by the trusted future clock-skew window.
+ * Ignores invalid or far-future previous timestamps so poisoned values cannot be
+ * perpetuated across edits/deletes or cause Date overflow.
+ */
+function computeLocalMonotonicTimestampMs(
+  nowMs: number,
+  ...previousTimes: Array<number | null>
+): number {
+  const maxAllowedMs = nowMs + MAX_FUTURE_CLOCK_SKEW_MS;
+  let nextMs = nowMs;
+  for (const prev of previousTimes) {
+    if (prev !== null && Number.isFinite(prev) && prev <= maxAllowedMs) {
+      nextMs = Math.max(nextMs, prev + 1);
+    }
+  }
+  return Math.min(nextMs, maxAllowedMs);
+}
 
 export type RemoteTombstone = Pick<Tombstone, 'noteId' | 'deletedAt' | 'deletionId'>;
 export type IncomingNoteResult = 'stored' | 'unchanged' | 'blocked' | 'inactive';
@@ -73,7 +102,8 @@ async function deleteDeliveriesForNoteOrDeletion(
 export async function deleteNoteWithTombstone(
   noteId: string,
   database: NotebookDB = db,
-  recipients: DeletionRecipient[] = []
+  recipients: DeletionRecipient[] = [],
+  now?: number
 ): Promise<Tombstone | null> {
   const uniqueRecipients = deduplicateRecipients(recipients);
   return database.transaction(
@@ -90,10 +120,12 @@ export async function deleteNoteWithTombstone(
         await deleteDeliveriesForNoteOrDeletion(database, noteId, existingTombstone.deletionId);
       }
 
-      const noteTime = Date.parse(note.updatedAt);
-      const deletedAtMs = Number.isFinite(noteTime)
-        ? Math.max(Date.now(), noteTime + 1)
-        : Date.now();
+      const nowMs = resolveNowMs(now);
+      const deletedAtMs = computeLocalMonotonicTimestampMs(
+        nowMs,
+        parseStrictIsoTimestampMs(note.updatedAt),
+        existingTombstone ? parseStrictIsoTimestampMs(existingTombstone.deletedAt) : null
+      );
       const trimmedTitle = note.title.trim();
 
       const tombstone: Tombstone = {
@@ -107,7 +139,7 @@ export async function deleteNoteWithTombstone(
       await database.notes.delete(noteId);
       await database.tombstones.put(tombstone);
 
-      const nowIso = new Date().toISOString();
+      const nowIso = new Date(nowMs).toISOString();
       for (const recipient of uniqueRecipients) {
         await database.deletionDeliveries.put({
           id: deletionDeliveryKey(tombstone.deletionId, recipient.pairingId, recipient.peerId),
@@ -177,10 +209,12 @@ export async function prepareDeletionDeliveries(
 
 export async function applyRemoteTombstone(
   incoming: RemoteTombstone,
-  database: NotebookDB = db
+  database: NotebookDB = db,
+  now: number = Date.now()
 ): Promise<ApplyTombstoneResult> {
-  const incomingTime = Date.parse(incoming.deletedAt);
-  if (!Number.isFinite(incomingTime)) {
+  const nowMs = resolveNowMs(now);
+  const incomingTime = parseTrustedTimestampMs(incoming.deletedAt, nowMs);
+  if (incomingTime === null) {
     return { outcome: 'invalid', removedNote: false };
   }
 
@@ -192,10 +226,10 @@ export async function applyRemoteTombstone(
     async () => {
       const current = await database.tombstones.get(incoming.noteId);
       const note = await database.notes.get(incoming.noteId);
-      const rawCurrentTime = current ? Date.parse(current.deletedAt) : Number.NEGATIVE_INFINITY;
-      const currentTime = Number.isFinite(rawCurrentTime)
-        ? rawCurrentTime
-        : Number.NEGATIVE_INFINITY;
+      const rawCurrentTime = current
+        ? parseTrustedTimestampMs(current.deletedAt, nowMs)
+        : null;
+      const currentTime = rawCurrentTime ?? Number.NEGATIVE_INFINITY;
 
       const useIncoming =
         !current ||
@@ -221,12 +255,13 @@ export async function applyRemoteTombstone(
             ...(preservedTitle && !current.noteTitle ? { noteTitle: preservedTitle } : {}),
           };
 
-      const effectiveTime = Date.parse(effective.deletedAt);
-      const noteTime = note ? Date.parse(note.updatedAt) : Number.NEGATIVE_INFINITY;
+      const effectiveTime =
+        parseTrustedTimestampMs(effective.deletedAt, nowMs) ?? incomingTime;
+      const noteTime = note ? parseTrustedTimestampMs(note.updatedAt, nowMs) : null;
 
       // Keep timestamp conflict resolution consistent: a strictly newer existing note
       // beats the effective deletion timestamp and must not keep a stale tombstone.
-      if (note && Number.isFinite(noteTime) && noteTime > effectiveTime) {
+      if (note && noteTime !== null && noteTime > effectiveTime) {
         if (current) {
           await database.tombstones.delete(incoming.noteId);
           await deleteDeliveriesForNoteOrDeletion(database, incoming.noteId, current.deletionId);
@@ -240,7 +275,7 @@ export async function applyRemoteTombstone(
 
       await database.tombstones.put(effective);
 
-      if (note && (!Number.isFinite(noteTime) || noteTime <= effectiveTime)) {
+      if (note && (noteTime === null || noteTime <= effectiveTime)) {
         await database.notes.delete(incoming.noteId);
         return { outcome: 'applied', removedNote: true };
       }
@@ -253,8 +288,10 @@ export async function persistIncomingNote(
   note: Note,
   allowLocalRestore: boolean,
   isStillAuthorized: () => boolean = () => true,
-  database: NotebookDB = db
+  database: NotebookDB = db,
+  now: number = Date.now()
 ): Promise<IncomingNoteResult> {
+  const nowMs = resolveNowMs(now);
   return database.transaction(
     'rw',
     database.notes,
@@ -265,15 +302,18 @@ export async function persistIncomingNote(
       const existing = await database.notes.get(note.id);
       if (!isStillAuthorized()) return 'inactive';
 
-      const incomingTime = Date.parse(note.updatedAt);
-      if (!Number.isFinite(incomingTime)) {
+      if (!hasTrustedNoteTimestamps(note, nowMs)) {
+        return 'blocked';
+      }
+      const incomingTime = parseTrustedTimestampMs(note.updatedAt, nowMs);
+      if (incomingTime === null) {
         return 'blocked';
       }
 
       if (tombstone) {
-        const tombstoneTime = Date.parse(tombstone.deletedAt);
+        const tombstoneTime = parseTrustedTimestampMs(tombstone.deletedAt, nowMs);
         const isNewerThanTombstone =
-          Number.isFinite(tombstoneTime) && incomingTime > tombstoneTime;
+          tombstoneTime !== null && incomingTime > tombstoneTime;
         const isExplicitLocalRestore =
           tombstone.scope === 'local' && allowLocalRestore;
 
@@ -285,8 +325,10 @@ export async function persistIncomingNote(
         await deleteDeliveriesForNoteOrDeletion(database, note.id, tombstone.deletionId);
       }
 
-      const existingTime = existing ? Date.parse(existing.updatedAt) : Number.NEGATIVE_INFINITY;
-      if (existing && Number.isFinite(existingTime) && incomingTime <= existingTime) {
+      const existingTime = existing
+        ? parseStrictIsoTimestampMs(existing.updatedAt)
+        : null;
+      if (existing && existingTime !== null && incomingTime <= existingTime) {
         return 'unchanged';
       }
 
@@ -322,7 +364,8 @@ function areAttachmentsEqual(
 export async function updateNoteSafely(
   noteId: string,
   patch: Partial<Pick<Note, 'title' | 'content' | 'attachments'>>,
-  database: NotebookDB = db
+  database: NotebookDB = db,
+  now?: number
 ): Promise<LocalNoteUpdateResult> {
   // Precompute contentHash outside the IndexedDB rw transaction because SubtleCrypto
   // awaits would otherwise cause IndexedDB transactions to auto-commit in browsers.
@@ -357,11 +400,12 @@ export async function updateNoteSafely(
           return { status: 'retry' as const };
         }
 
-        const currentTime = Date.parse(current.updatedAt);
-        const nowMs = Date.now();
-        const updatedAt = new Date(
-          Number.isFinite(currentTime) ? Math.max(nowMs, currentTime + 1) : nowMs
-        ).toISOString();
+        const nowMs = resolveNowMs(now);
+        const updatedAtMs = computeLocalMonotonicTimestampMs(
+          nowMs,
+          parseStrictIsoTimestampMs(current.updatedAt)
+        );
+        const updatedAt = new Date(updatedAtMs).toISOString();
 
         const next: Note = {
           ...current,
@@ -434,8 +478,14 @@ export async function updateTombstoneDelivery(
  */
 export async function reconcileInterruptedDeletionDeliveries(
   database: NotebookDB = db,
-  maxUpdatedAtMs: number = Date.now() - STALE_PENDING_DELIVERY_MS
+  maxUpdatedAtMs?: number,
+  now?: number
 ): Promise<number> {
+  const nowMs = resolveNowMs(now);
+  const cutoffMs =
+    maxUpdatedAtMs !== undefined && Number.isFinite(maxUpdatedAtMs)
+      ? maxUpdatedAtMs
+      : nowMs - STALE_PENDING_DELIVERY_MS;
   return database.transaction(
     'rw',
     database.tombstones,
@@ -444,12 +494,12 @@ export async function reconcileInterruptedDeletionDeliveries(
       const allDeliveries = await database.deletionDeliveries.toArray();
       const stalePending = allDeliveries.filter((delivery) => {
         if (delivery.status !== 'pending') return false;
-        const updatedMs = Date.parse(delivery.updatedAt);
-        return !Number.isFinite(updatedMs) || updatedMs <= maxUpdatedAtMs;
+        const updatedMs = parseTrustedTimestampMs(delivery.updatedAt, nowMs);
+        return updatedMs === null || updatedMs <= cutoffMs;
       });
       if (stalePending.length === 0) return 0;
 
-      const nowIso = new Date().toISOString();
+      const nowIso = new Date(nowMs).toISOString();
       const affectedNoteIds = new Set<string>();
       for (const delivery of stalePending) {
         await database.deletionDeliveries.put({
@@ -483,9 +533,11 @@ export async function reconcileInterruptedDeletionDeliveries(
 
 export async function loadDeletionActivity(
   database: NotebookDB = db,
-  stalePendingMs: number = STALE_PENDING_DELIVERY_MS
+  stalePendingMs: number = STALE_PENDING_DELIVERY_MS,
+  now?: number
 ): Promise<DeletionActivityEntry[]> {
-  await reconcileInterruptedDeletionDeliveries(database, Date.now() - stalePendingMs);
+  const nowMs = resolveNowMs(now);
+  await reconcileInterruptedDeletionDeliveries(database, nowMs - stalePendingMs, nowMs);
 
   const [tombstones, deliveries, pairings] = await Promise.all([
     database.tombstones.toArray(),
@@ -504,9 +556,9 @@ export async function loadDeletionActivity(
   }
 
   const sortedTombstones = [...tombstones].sort((a, b) => {
-    const timeA = Date.parse(a.deletedAt);
-    const timeB = Date.parse(b.deletedAt);
-    return (Number.isFinite(timeB) ? timeB : 0) - (Number.isFinite(timeA) ? timeA : 0);
+    const timeA = parseTrustedTimestampMs(a.deletedAt, nowMs) ?? 0;
+    const timeB = parseTrustedTimestampMs(b.deletedAt, nowMs) ?? 0;
+    return timeB - timeA;
   });
 
   return sortedTombstones.map((tombstone) => {

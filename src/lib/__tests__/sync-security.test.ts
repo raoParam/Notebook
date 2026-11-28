@@ -4,6 +4,7 @@ import {
   MAX_ATTACHMENT_DATA_LENGTH,
   MAX_COMPRESSED_NOTE_BYTES,
   MAX_DECOMPRESSED_NOTE_BYTES,
+  MAX_FUTURE_CLOCK_SKEW_MS,
   MAX_MANIFEST_ENTRIES,
   MAX_NOTE_CONTENT_LENGTH,
   MAX_NOTE_TITLE_LENGTH,
@@ -14,7 +15,10 @@ import {
   countUnchangedNotes,
   decompressNote,
   isSafeAttachmentDataUrl,
+  isTrustedTimestamp,
+  parseStrictIsoTimestampMs,
   parseSyncMessage,
+  parseTrustedTimestampMs,
   validateNote,
 } from '@/lib/sync';
 import type { Note } from '@/lib/db';
@@ -788,5 +792,229 @@ describe('validateNote and isSafeAttachmentDataUrl', () => {
       e.noteId === 'n-new' ? { ...e, contentHash: 'h5-edited' } : e
     );
     expect(computeManifestDigest(changedPeer)).not.toBe(digestForward);
+  });
+});
+
+describe('timestamp trust policy and far-future protection', () => {
+  const now = Date.UTC(2026, 10, 28, 12, 0, 0);
+
+  it('enforces strict ISO-8601 format and future skew bounds in timestamp helpers', () => {
+    expect(MAX_FUTURE_CLOCK_SKEW_MS).toBe(5 * 60 * 1000);
+
+    // Valid past, present, explicit timezone offset, and exact future skew boundary
+    expect(parseStrictIsoTimestampMs('2026-01-01T00:00:00.000Z')).toBe(Date.UTC(2026, 0, 1));
+    expect(parseStrictIsoTimestampMs('2026-01-01T05:30:00+05:30')).toBe(Date.UTC(2026, 0, 1));
+    expect(parseStrictIsoTimestampMs('2024-02-29T12:00:00Z')).toBe(Date.UTC(2024, 1, 29, 12));
+    expect(isTrustedTimestamp('1970-01-01T00:00:00.000Z', now)).toBe(true);
+    expect(isTrustedTimestamp(new Date(now + 60_000).toISOString(), now)).toBe(true);
+    expect(isTrustedTimestamp(new Date(now + MAX_FUTURE_CLOCK_SKEW_MS).toISOString(), now)).toBe(true);
+
+    // Far-future timestamps beyond allowed skew are rejected
+    expect(
+      parseTrustedTimestampMs(new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 1).toISOString(), now)
+    ).toBeNull();
+    expect(isTrustedTimestamp('9999-12-31T23:59:59.999Z', now)).toBe(false);
+
+    // Loose Date.parse quirks, missing timezones, rollovers, pre-epoch, and extreme bounds are rejected
+    const invalidInputs: unknown[] = [
+      '',
+      '   ',
+      null,
+      undefined,
+      1700000000000,
+      '2026',
+      '2026-01-01',
+      '2026-01-01T00:00:00',
+      '2026-01-01 00:00:00Z',
+      'May 1, 2026',
+      '2026-02-29T00:00:00.000Z', // 2026 is not a leap year
+      '2026-04-31T00:00:00.000Z',
+      ' 2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:00.000Z ',
+      '1969-12-31T23:59:59.999Z',
+      '+275760-09-13T00:00:00.000Z',
+      '-000001-01-01T00:00:00.000Z',
+    ];
+    for (const bad of invalidInputs) {
+      expect(parseStrictIsoTimestampMs(bad)).toBeNull();
+      expect(isTrustedTimestamp(bad, now)).toBe(false);
+    }
+  });
+
+  it('rejects far-future and malformed timestamps in manifest and tombstone messages', () => {
+    const withinSkew = new Date(now + MAX_FUTURE_CLOCK_SKEW_MS).toISOString();
+    const beyondSkew = new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 1).toISOString();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'manifest',
+          entries: [{ noteId: 'n1', contentHash: 'h1', updatedAt: withinSkew }],
+        },
+        now
+      )
+    ).not.toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'manifest',
+          entries: [{ noteId: 'n1', contentHash: 'h1', updatedAt: beyondSkew }],
+        },
+        now
+      )
+    ).toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'manifest',
+          entries: [{ noteId: 'n1', contentHash: 'h1', updatedAt: '9999-12-31T23:59:59.999Z' }],
+        },
+        now
+      )
+    ).toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'manifest',
+          entries: [{ noteId: 'n1', contentHash: 'h1', updatedAt: '2026-01-01' }],
+        },
+        now
+      )
+    ).toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'tombstone',
+          noteId: 'n1',
+          deletedAt: withinSkew,
+          deletionId: 'del-ok',
+        },
+        now
+      )
+    ).not.toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'tombstone',
+          noteId: 'n1',
+          deletedAt: beyondSkew,
+          deletionId: 'del-future',
+        },
+        now
+      )
+    ).toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'tombstone',
+          noteId: 'n1',
+          deletedAt: '9999-12-31T23:59:59.999Z',
+          deletionId: 'del-9999',
+        },
+        now
+      )
+    ).toBeNull();
+
+    expect(
+      parseSyncMessage(
+        {
+          type: 'tombstone',
+          noteId: 'n1',
+          deletedAt: '2026-02-30T00:00:00.000Z',
+          deletionId: 'del-rollover',
+        },
+        now
+      )
+    ).toBeNull();
+  });
+
+  it('rejects far-future note and attachment timestamps in validateNote and decompressNote', async () => {
+    const withinSkew = new Date(now + 60_000).toISOString();
+    const beyondSkew = new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 1).toISOString();
+
+    const validSkewNote = makeValidNote({
+      createdAt: withinSkew,
+      updatedAt: withinSkew,
+      attachments: {
+        att1: {
+          name: 'image.png',
+          data: 'data:image/png;base64,iVBORw0KGgo=',
+          createdAt: withinSkew,
+        },
+      },
+    });
+    expect(validateNote(validSkewNote, now)).toEqual(validSkewNote);
+    const compressedValid = await compressNote(validSkewNote);
+    expect(await decompressNote(compressedValid, now)).toEqual(validSkewNote);
+
+    const badNotes = [
+      makeValidNote({ updatedAt: beyondSkew }),
+      makeValidNote({ updatedAt: '9999-12-31T23:59:59.999Z' }),
+      makeValidNote({ createdAt: beyondSkew }),
+      makeValidNote({
+        attachments: {
+          att1: {
+            name: 'image.png',
+            data: 'data:image/png;base64,iVBORw0KGgo=',
+            createdAt: beyondSkew,
+          },
+        },
+      }),
+      makeValidNote({ updatedAt: '2026-01-01T00:00:00' }),
+      makeValidNote({ createdAt: '2026-02-30T00:00:00.000Z' }),
+    ];
+
+    for (const badNote of badNotes) {
+      expect(() => validateNote(badNote, now)).toThrow(/timestamp/i);
+      const compressed = await compressNote(badNote);
+      await expect(decompressNote(compressed, now)).rejects.toThrow(/timestamp/i);
+    }
+  });
+
+  it('never classifies far-future or invalid peer manifest entries as new or updated', () => {
+    const local = [
+      { noteId: 'conflict-note', contentHash: 'h-local', updatedAt: new Date(now - 60_000).toISOString() },
+      { noteId: 'same-note', contentHash: 'h-same', updatedAt: new Date(now - 60_000).toISOString() },
+    ];
+    const peer = [
+      {
+        noteId: 'conflict-note',
+        title: 'Poisoned Update',
+        contentHash: 'h-evil',
+        updatedAt: '9999-12-31T23:59:59.999Z',
+      },
+      {
+        noteId: 'new-far-future',
+        title: 'Poisoned New',
+        contentHash: 'h-evil-new',
+        updatedAt: new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 1).toISOString(),
+      },
+      {
+        noteId: 'same-note',
+        title: 'Same Content',
+        contentHash: 'h-same',
+        updatedAt: '9999-12-31T23:59:59.999Z',
+      },
+      {
+        noteId: 'legit-skew-new',
+        title: 'Valid Skew New',
+        contentHash: 'h-legit',
+        updatedAt: new Date(now + 60_000).toISOString(),
+      },
+    ];
+
+    const previews = classifyPeerNotes(local, peer, now);
+    const byId = new Map(previews.map((p) => [p.noteId, p]));
+
+    expect(byId.get('conflict-note')?.relation).toBe('conflict');
+    expect(byId.get('new-far-future')?.relation).toBe('conflict');
+    expect(byId.get('same-note')?.relation).toBe('identical');
+    expect(byId.get('legit-skew-new')?.relation).toBe('new');
   });
 });

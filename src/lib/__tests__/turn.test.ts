@@ -30,6 +30,7 @@ describe('/api/ice-servers route', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
@@ -38,7 +39,7 @@ describe('/api/ice-servers route', () => {
     expect(Object.keys(routeModule).sort()).toEqual(['GET', 'dynamic']);
     expect(routeModule.dynamic).toBe('force-dynamic');
     expect(typeof routeModule.GET).toBe('function');
-  });
+  }, 15_000);
 
   it('returns STUN fallback without calling fetch when env vars are missing', async () => {
     vi.stubEnv('METERED_APP_NAME', '');
@@ -249,6 +250,394 @@ describe('/api/ice-servers route', () => {
     expect(thirdBody).toEqual(expectedSanitized);
     expect(fetchSpy).toHaveBeenCalledTimes(2);
   });
+
+  it('rejects cross-site browser requests via Sec-Fetch-Site without calling Metered', async () => {
+    const secretKey = 'secret-cross-site-key';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const { GET } = await import('../../app/api/ice-servers/route');
+
+    const crossSiteReq = new Request('https://notebook.example.com/api/ice-servers', {
+      headers: { 'sec-fetch-site': 'cross-site' },
+    });
+    const blockedRes = await GET(crossSiteReq);
+    const blockedText = await blockedRes.text();
+
+    expect(blockedRes.status).toBe(403);
+    expect(blockedRes.headers.get('cache-control')).toBe('no-store');
+    expect(blockedRes.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(blockedRes.headers.get('vary')).toBe('Sec-Fetch-Site');
+    expect(blockedText).not.toContain(secretKey);
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    fetchSpy.mockResolvedValueOnce(
+      new Response(JSON.stringify([{ urls: 'turn:ok.example.com:3478', username: 'u', credential: 'c' }]), {
+        status: 200,
+      }),
+    );
+    const sameOriginReq = new Request('https://notebook.example.com/api/ice-servers', {
+      headers: { 'sec-fetch-site': 'same-origin' },
+    });
+    const allowedRes = await GET(sameOriginReq);
+    expect(allowedRes.status).toBe(200);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { label: 'leading hyphen', appName: '-notebook', apiKey: 'valid-key' },
+    { label: 'trailing hyphen', appName: 'notebook-', apiKey: 'valid-key' },
+    { label: 'over 63 chars', appName: 'a'.repeat(64), apiKey: 'valid-key' },
+    { label: 'control char in apiKey', appName: 'notebook-app', apiKey: 'key\ninjected' },
+  ])('falls back without calling fetch on invalid config ($label)', async ({ appName, apiKey }) => {
+    vi.stubEnv('METERED_APP_NAME', appName);
+    vi.stubEnv('METERED_API_KEY', apiKey);
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const response = await GET();
+    const rawText = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(JSON.parse(rawText)).toEqual(EXPECTED_FALLBACK);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(rawText).not.toContain(apiKey);
+    expect(collectConsoleMessages(warnSpy, errorSpy)).not.toContain(apiKey);
+  });
+
+  it('does not cache upstream HTTP 5xx failures and never leaks secrets', async () => {
+    const secretKey = 'secret-5xx-key';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(`Upstream error apiKey=${secretKey}`, { status: 502 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:recovered.example.com:3478', username: 'u', credential: 'c' }]), {
+          status: 200,
+        }),
+      );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+
+    const firstRes = await GET();
+    expect(await firstRes.json()).toEqual(EXPECTED_FALLBACK);
+
+    const secondRes = await GET();
+    expect(await secondRes.json()).toEqual([
+      { urls: 'turn:recovered.example.com:3478', username: 'u', credential: 'c' },
+      ...EXPECTED_FALLBACK,
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(collectConsoleMessages(warnSpy, errorSpy)).not.toContain(secretKey);
+  });
+
+  it('sanitizes error names so secrets embedded in error objects never reach logs', async () => {
+    const secretKey = 'secret-in-error-name';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const weirdError = new Error('boom');
+    weirdError.name = `FetchError https://notebook-app.metered.live?apiKey=${secretKey}`;
+    vi.spyOn(globalThis, 'fetch').mockRejectedValueOnce(weirdError);
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(EXPECTED_FALLBACK);
+    const logs = collectConsoleMessages(warnSpy, errorSpy);
+    expect(logs).not.toContain(secretKey);
+    expect(logs).not.toContain('metered.live');
+  });
+
+  it('falls back on non-JSON upstream body and does not cache the failure', async () => {
+    const secretKey = 'secret-non-json-key';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(`<html>bad gateway apiKey=${secretKey}</html>`, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:ok.example.com:3478', username: 'u', credential: 'c' }]), {
+          status: 200,
+        }),
+      );
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const first = await GET();
+    expect(await first.json()).toEqual(EXPECTED_FALLBACK);
+
+    const second = await GET();
+    expect(await second.json()).toEqual([
+      { urls: 'turn:ok.example.com:3478', username: 'u', credential: 'c' },
+      ...EXPECTED_FALLBACK,
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    expect(collectConsoleMessages(warnSpy, errorSpy)).not.toContain(secretKey);
+  });
+
+  it('rejects oversized upstream response bodies (> 64 KB) via Content-Length or stream', async () => {
+    const secretKey = 'secret-oversized-body';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const hugePayload = JSON.stringify([{ urls: 'stun:stun.example.com:3478', pad: 'x'.repeat(70_000) }]);
+
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response('[]', {
+          status: 200,
+          headers: { 'content-length': '100000' },
+        }),
+      )
+      .mockResolvedValueOnce(new Response(hugePayload, { status: 200 }));
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+
+    const res1 = await GET();
+    expect(await res1.json()).toEqual(EXPECTED_FALLBACK);
+
+    const res2 = await GET();
+    expect(await res2.json()).toEqual(EXPECTED_FALLBACK);
+    expect(collectConsoleMessages(warnSpy, errorSpy)).not.toContain(secretKey);
+  });
+
+  it('falls back when upstream times out during response body read', async () => {
+    vi.useFakeTimers();
+    const secretKey = 'secret-body-timeout';
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', secretKey);
+
+    const stalledStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('[{"urls":"stun:'));
+        // Never closes or finishes until aborted
+      },
+    });
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(stalledStream, { status: 200 }));
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const pending = GET();
+    await vi.advanceTimersByTimeAsync(5_000);
+    const response = await pending;
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(EXPECTED_FALLBACK);
+    expect(collectConsoleMessages(warnSpy, errorSpy)).not.toContain(secretKey);
+  });
+
+  it.each([
+    {
+      label: 'excessive entry count',
+      payload: Array.from({ length: 33 }, (_, i) => ({ urls: `stun:s${i}.example.com:3478` })),
+    },
+    {
+      label: 'excessive urls array length',
+      payload: [{ urls: Array.from({ length: 17 }, (_, i) => `stun:s${i}.example.com:3478`) }],
+    },
+    {
+      label: 'oversized URI',
+      payload: [{ urls: `stun:${'a'.repeat(520)}.example.com:3478` }],
+    },
+    {
+      label: 'oversized credential',
+      payload: [{ urls: 'turn:ok.example.com:3478', username: 'u', credential: 'c'.repeat(520) }],
+    },
+    {
+      label: 'whitespace in URI',
+      payload: [{ urls: 'turn:ok.example.com:3478 extra' }],
+    },
+    {
+      label: 'control character in URI',
+      payload: [{ urls: 'turn:ok.example.com:3478\u0000' }],
+    },
+    {
+      label: 'whitespace in username',
+      payload: [{ urls: 'turn:ok.example.com:3478', username: 'bad user', credential: 'pass' }],
+    },
+    {
+      label: 'control character in credential',
+      payload: [{ urls: 'turn:ok.example.com:3478', username: 'user', credential: 'pass\nline' }],
+    },
+    {
+      label: 'empty credential',
+      payload: [{ urls: 'turn:ok.example.com:3478', username: 'user', credential: '' }],
+    },
+    {
+      label: 'authority slashes in ICE URI',
+      payload: [{ urls: 'turn://evil.example.com:3478' }],
+    },
+    {
+      label: 'out-of-range port',
+      payload: [{ urls: 'turn:ok.example.com:70000' }],
+    },
+    {
+      label: 'zero port',
+      payload: [{ urls: 'turn:ok.example.com:0' }],
+    },
+    {
+      label: 'double dots in host',
+      payload: [{ urls: 'stun:bad..example.com:3478' }],
+    },
+    {
+      label: 'non-plain Date object',
+      payload: [new Date()],
+    },
+    {
+      label: 'object with inherited prototype urls',
+      payload: [Object.create({ urls: 'stun:inherited.example.com:3478' })],
+    },
+  ])('returns STUN fallback on invalid or unsafe provider response ($label)', async ({ payload }) => {
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify(payload), { status: 200 }),
+    );
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const response = await GET();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(EXPECTED_FALLBACK);
+  });
+
+  it('respects short upstream ttl so cached credentials never outlive provider expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:ttl.example.com:3478', username: 'u1', credential: 'c1', ttl: 120 }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:ttl.example.com:3478', username: 'u2', credential: 'c2', ttl: 120 }]),
+          { status: 200 },
+        ),
+      );
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+
+    const first = (await (await GET()).json()) as IceServer[];
+    expect(first[0]?.username).toBe('u1');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Within 90s buffered TTL (120s - 30s buffer) -> served from cache
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    const second = (await (await GET()).json()) as IceServer[];
+    expect(second[0]?.username).toBe('u1');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    // Past 90s buffered TTL -> refreshes before 120s upstream expiry
+    await vi.advanceTimersByTimeAsync(35 * 1000);
+    const third = (await (await GET()).json()) as IceServer[];
+    expect(third[0]?.username).toBe('u2');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('coalesces concurrent in-flight requests within an instance to prevent cache stampede', async () => {
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    let resolveUpstream!: (res: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveUpstream = resolve;
+        }),
+    );
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+
+    const pendingA = GET();
+    const pendingB = GET();
+    const pendingC = GET();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    resolveUpstream(
+      new Response(JSON.stringify([{ urls: 'turn:coalesced.example.com:3478', username: 'u', credential: 'c' }]), {
+        status: 200,
+      }),
+    );
+
+    const [resA, resB, resC] = await Promise.all([pendingA, pendingB, pendingC]);
+    const [bodyA, bodyB, bodyC] = await Promise.all([resA.json(), resB.json(), resC.json()]);
+
+    const expected = [
+      { urls: 'turn:coalesced.example.com:3478', username: 'u', credential: 'c' },
+      ...EXPECTED_FALLBACK,
+    ];
+    expect(bodyA).toEqual(expected);
+    expect(bodyB).toEqual(expected);
+    expect(bodyC).toEqual(expected);
+    expect(resA.headers.get('cache-control')).toBe('no-store');
+    expect(resB.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('falls back gracefully when global fetch is unavailable', async () => {
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+    vi.stubGlobal('fetch', undefined);
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const { GET } = await import('../../app/api/ice-servers/route');
+    const response = await GET();
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(EXPECTED_FALLBACK);
+  });
+});
+
+describe('sanitizeIceServers() hardening in src/lib/turn.ts', () => {
+  it('strips dangerous keys without prototype pollution and deduplicates entries', async () => {
+    const { sanitizeIceServers } = await import('../turn');
+
+    const craftedJson =
+      '[{"urls":["stun:a.example.com:3478","stun:a.example.com:3478"],"__proto__":{"polluted":true},"constructor":{"bad":true}},' +
+      '{"urls":["stun:a.example.com:3478"]},' +
+      '{"__proto__":{"urls":"stun:proto.example.com:3478"}},' +
+      '{"urls":"turns:[2001:db8::1]:443?transport=tcp","username":"u1","credential":"c1"}]';
+
+    const parsed: unknown = JSON.parse(craftedJson);
+    const result = sanitizeIceServers(parsed);
+
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    expect(result).toEqual([
+      { urls: ['stun:a.example.com:3478'] },
+      { urls: 'turns:[2001:db8::1]:443?transport=tcp', username: 'u1', credential: 'c1' },
+    ]);
+    expect(Object.hasOwn(result[0] as object, '__proto__')).toBe(false);
+    expect(Object.hasOwn(result[0] as object, 'constructor')).toBe(false);
+  });
 });
 
 describe('client getIceServers() in src/lib/turn.ts', () => {
@@ -259,14 +648,16 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
 
-  it('contains no METERED_API_KEY, METERED_APP_NAME, or NEXT_PUBLIC_METERED_ references', () => {
+  it('contains no METERED_API_KEY, METERED_APP_NAME, NEXT_PUBLIC_METERED_, or metered.live references', () => {
     const turnSource = fs.readFileSync(new URL('../turn.ts', import.meta.url), 'utf8');
     expect(turnSource).not.toContain('METERED_API_KEY');
     expect(turnSource).not.toContain('METERED_APP_NAME');
     expect(turnSource).not.toContain('NEXT_PUBLIC_METERED_');
+    expect(turnSource).not.toContain('metered.live');
   });
 
   it('fetches /api/ice-servers, validates response, and caches for 10 minutes', async () => {
@@ -339,5 +730,76 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
       { urls: 'turn:recovered.example.com:3478', username: 'u', credential: 'c' },
     ]);
     expect(fetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('coalesces concurrent getIceServers() calls into a single /api/ice-servers fetch', async () => {
+    let resolveFetch!: (res: Response) => void;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve;
+        }),
+    );
+
+    const { getIceServers } = await import('../turn');
+
+    const p1 = getIceServers();
+    const p2 = getIceServers();
+    const p3 = getIceServers();
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+
+    resolveFetch(
+      new Response(JSON.stringify([{ urls: 'turn:shared.example.com:3478', username: 'u', credential: 'c' }]), {
+        status: 200,
+      }),
+    );
+
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    expect(r1).toEqual([{ urls: 'turn:shared.example.com:3478', username: 'u', credential: 'c' }]);
+    expect(r2).toEqual(r1);
+    expect(r3).toEqual(r1);
+  });
+
+  it('falls back to FALLBACK_ICE_SERVERS on non-JSON body, oversized body, body timeout, or missing fetch', async () => {
+    vi.useFakeTimers();
+
+    const stalledStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('[{"urls":'));
+      },
+    });
+
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('not-json', { status: 200 }))
+      .mockResolvedValueOnce(new Response('[]', { status: 200, headers: { 'content-length': '99999' } }))
+      .mockResolvedValueOnce(new Response(stalledStream, { status: 200 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify([{ urls: 'turn:healthy.example.com:3478', username: 'u', credential: 'c' }]), {
+          status: 200,
+        }),
+      );
+
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { FALLBACK_ICE_SERVERS, getIceServers } = await import('../turn');
+
+    expect(await getIceServers()).toEqual(FALLBACK_ICE_SERVERS);
+    expect(await getIceServers()).toEqual(FALLBACK_ICE_SERVERS);
+
+    const pendingTimeout = getIceServers();
+    await vi.advanceTimersByTimeAsync(8_000);
+    expect(await pendingTimeout).toEqual(FALLBACK_ICE_SERVERS);
+
+    // None of the failures were cached
+    expect(await getIceServers()).toEqual([
+      { urls: 'turn:healthy.example.com:3478', username: 'u', credential: 'c' },
+    ]);
+    expect(fetchSpy).toHaveBeenCalledTimes(4);
+
+    vi.resetModules();
+    vi.stubGlobal('fetch', undefined);
+    const { FALLBACK_ICE_SERVERS: ssrFallback, getIceServers: getIceServersSsr } = await import('../turn');
+    expect(await getIceServersSsr()).toEqual(ssrFallback);
   });
 });

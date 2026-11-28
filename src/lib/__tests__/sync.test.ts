@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_FUTURE_CLOCK_SKEW_MS,
   compressNote,
   computeDiff,
   decompressNote,
@@ -55,6 +56,43 @@ describe('computeDiff', () => {
     ];
 
     expect(computeDiff(local, peer)).toEqual([]);
+  });
+
+  it('never requests missing or conflicting peer notes with far-future or invalid timestamps, while honoring allowed skew', () => {
+    const now = Date.UTC(2026, 10, 28, 12, 0, 0);
+    const local: ManifestEntry[] = [
+      { noteId: 'existing-valid', contentHash: 'h-local', updatedAt: new Date(now - 60_000).toISOString() },
+      { noteId: 'existing-skew', contentHash: 'h-local-2', updatedAt: new Date(now - 10_000).toISOString() },
+    ];
+    const peer: ManifestEntry[] = [
+      {
+        noteId: 'existing-valid',
+        contentHash: 'h-far-future',
+        updatedAt: new Date(now + MAX_FUTURE_CLOCK_SKEW_MS + 1).toISOString(),
+      },
+      {
+        noteId: 'missing-far-future',
+        contentHash: 'h-9999',
+        updatedAt: '9999-12-31T23:59:59.999Z',
+      },
+      {
+        noteId: 'missing-malformed',
+        contentHash: 'h-bad',
+        updatedAt: '2026-01-01',
+      },
+      {
+        noteId: 'existing-skew',
+        contentHash: 'h-skew-new',
+        updatedAt: new Date(now + MAX_FUTURE_CLOCK_SKEW_MS).toISOString(),
+      },
+      {
+        noteId: 'missing-skew',
+        contentHash: 'h-missing-skew',
+        updatedAt: new Date(now + 60_000).toISOString(),
+      },
+    ];
+
+    expect(computeDiff(local, peer, now)).toEqual(['existing-skew', 'missing-skew']);
   });
 });
 

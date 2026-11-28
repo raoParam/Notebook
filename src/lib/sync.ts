@@ -22,6 +22,23 @@ const MAX_HASH_LENGTH = 128;
 const MAX_TIMESTAMP_LENGTH = 64;
 const MAX_ATTACHMENT_NAME_LENGTH = 256;
 const MAX_ERROR_MESSAGE_LENGTH = 256;
+
+/**
+ * Maximum allowed clock skew in the future (5 minutes) for incoming sync
+ * timestamps across notes, attachments, manifests, and deletion tombstones.
+ *
+ * Tolerates typical NTP/RTC clock drift between consumer devices while blocking
+ * malicious or misconfigured peers from pinning last-write-wins decisions
+ * with far-future timestamps.
+ */
+export const MAX_FUTURE_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/** Minimum accepted epoch timestamp (1970-01-01T00:00:00.000Z). */
+export const MIN_VALID_TIMESTAMP_MS = 0;
+
+const STRICT_ISO_TIMESTAMP_RE =
+  /^(\d{4})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.(\d{1,9}))?(Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
+
 const DANGEROUS_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 const SAFE_ATTACHMENT_DATA_URL_RE =
   /^data:image\/(png|jpeg|jpg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/i;
@@ -109,13 +126,94 @@ function isValidNoteId(value: unknown): value is string {
   );
 }
 
-function isValidTimestamp(value: unknown): value is string {
-  return (
-    typeof value === 'string' &&
-    value.length > 0 &&
-    value.length <= MAX_TIMESTAMP_LENGTH &&
-    Number.isFinite(Date.parse(value))
-  );
+function resolveNowMs(now: number): number {
+  return Number.isFinite(now) ? now : Date.now();
+}
+
+/**
+ * Parse a strict ISO-8601 date-time string with an explicit timezone (`Z` or `±HH:MM`)
+ * into Unix epoch milliseconds. Rejects loose `Date.parse` formats (such as date-only
+ * strings, missing timezones, non-ISO words, calendar rollovers, or pre-epoch dates).
+ */
+export function parseStrictIsoTimestampMs(value: unknown): number | null {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.length > MAX_TIMESTAMP_LENGTH
+  ) {
+    return null;
+  }
+  const match = STRICT_ISO_TIMESTAMP_RE.exec(value);
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const calendarCheck = new Date(Date.UTC(year, month - 1, day));
+  if (
+    calendarCheck.getUTCFullYear() !== year ||
+    calendarCheck.getUTCMonth() !== month - 1 ||
+    calendarCheck.getUTCDate() !== day
+  ) {
+    return null;
+  }
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms) || ms < MIN_VALID_TIMESTAMP_MS) {
+    return null;
+  }
+  return ms;
+}
+
+/**
+ * Parse an untrusted sync timestamp and enforce the timestamp trust policy:
+ * strict ISO-8601 with explicit timezone, `>= MIN_VALID_TIMESTAMP_MS`, and
+ * `<= now + MAX_FUTURE_CLOCK_SKEW_MS`.
+ */
+export function parseTrustedTimestampMs(
+  value: unknown,
+  now: number = Date.now()
+): number | null {
+  const ms = parseStrictIsoTimestampMs(value);
+  if (ms === null) {
+    return null;
+  }
+  const maxAllowedMs = resolveNowMs(now) + MAX_FUTURE_CLOCK_SKEW_MS;
+  if (ms > maxAllowedMs) {
+    return null;
+  }
+  return ms;
+}
+
+/** Check whether a value is a valid, trusted ISO-8601 timestamp within allowed future skew. */
+export function isTrustedTimestamp(
+  value: unknown,
+  now: number = Date.now()
+): value is string {
+  return parseTrustedTimestampMs(value, now) !== null;
+}
+
+/** Check whether all timestamps on a Note (createdAt, updatedAt, and attachments) satisfy the trust policy. */
+export function hasTrustedNoteTimestamps(
+  note: Note,
+  now: number = Date.now()
+): boolean {
+  const nowMs = resolveNowMs(now);
+  if (
+    !isTrustedTimestamp(note.createdAt, nowMs) ||
+    !isTrustedTimestamp(note.updatedAt, nowMs)
+  ) {
+    return false;
+  }
+  if (!isPlainObject(note.attachments)) {
+    return false;
+  }
+  for (const entry of Object.values(note.attachments)) {
+    if (!isPlainObject(entry) || !isTrustedTimestamp(entry.createdAt, nowMs)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function isValidHash(value: unknown, allowEmpty: boolean): value is string {
@@ -144,7 +242,8 @@ export function isSafeAttachmentDataUrl(data: string): boolean {
 }
 
 /** Validate and sanitize an untrusted Note object, stripping unexpected properties */
-export function validateNote(raw: unknown): Note {
+export function validateNote(raw: unknown, now: number = Date.now()): Note {
+  const nowMs = resolveNowMs(now);
   if (!isPlainObject(raw)) {
     throw new Error('Note must be a plain object');
   }
@@ -157,10 +256,10 @@ export function validateNote(raw: unknown): Note {
   if (typeof raw.content !== 'string' || raw.content.length > MAX_NOTE_CONTENT_LENGTH) {
     throw new Error('Invalid note content');
   }
-  if (!isValidTimestamp(raw.createdAt)) {
+  if (!isTrustedTimestamp(raw.createdAt, nowMs)) {
     throw new Error('Invalid note createdAt timestamp');
   }
-  if (!isValidTimestamp(raw.updatedAt)) {
+  if (!isTrustedTimestamp(raw.updatedAt, nowMs)) {
     throw new Error('Invalid note updatedAt timestamp');
   }
   if (!isValidHash(raw.contentHash, true)) {
@@ -191,7 +290,7 @@ export function validateNote(raw: unknown): Note {
     ) {
       throw new Error('Invalid attachment name');
     }
-    if (!isValidTimestamp(entry.createdAt)) {
+    if (!isTrustedTimestamp(entry.createdAt, nowMs)) {
       throw new Error('Invalid attachment createdAt timestamp');
     }
     if (typeof entry.data !== 'string' || !isSafeAttachmentDataUrl(entry.data)) {
@@ -216,7 +315,11 @@ export function validateNote(raw: unknown): Note {
 }
 
 /** Parse and validate an untrusted incoming sync message */
-export function parseSyncMessage(data: unknown): SyncMessage | null {
+export function parseSyncMessage(
+  data: unknown,
+  now: number = Date.now()
+): SyncMessage | null {
+  const nowMs = resolveNowMs(now);
   if (!isPlainObject(data)) {
     return null;
   }
@@ -246,7 +349,7 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
         if (!isPlainObject(item)) return null;
         if (!isValidNoteId(item.noteId)) return null;
         if (!isValidHash(item.contentHash, false)) return null;
-        if (!isValidTimestamp(item.updatedAt)) return null;
+        if (!isTrustedTimestamp(item.updatedAt, nowMs)) return null;
         if (
           item.title !== undefined &&
           (typeof item.title !== 'string' ||
@@ -409,7 +512,7 @@ export function parseSyncMessage(data: unknown): SyncMessage | null {
     case 'tombstone': {
       if (!isValidNoteId(data.noteId)) return null;
       if (!isValidNoteId(data.deletionId)) return null;
-      if (!isValidTimestamp(data.deletedAt)) return null;
+      if (!isTrustedTimestamp(data.deletedAt, nowMs)) return null;
       return {
         type: 'tombstone',
         noteId: data.noteId,
@@ -464,23 +567,30 @@ export interface PeerNotePreview {
 
 /**
  * Classify notes from a peer manifest relative to the local manifest for manual/selective sync UI.
+ * Untrusted or far-future peer timestamps never classify as 'new' or 'updated'.
  */
 export function classifyPeerNotes(
   localManifest: ManifestEntry[],
-  peerManifest: ManifestEntry[]
+  peerManifest: ManifestEntry[],
+  now: number = Date.now()
 ): PeerNotePreview[] {
+  const nowMs = resolveNowMs(now);
   const localMap = new Map(localManifest.map((e) => [e.noteId, e]));
   return peerManifest.map((peer) => {
     const local = localMap.get(peer.noteId);
+    const peerTime = parseTrustedTimestampMs(peer.updatedAt, nowMs);
     let relation: PeerNoteRelation;
     if (!local) {
-      relation = 'new';
+      relation = peerTime === null ? 'conflict' : 'new';
     } else if (local.contentHash === peer.contentHash) {
       relation = 'identical';
+    } else if (peerTime === null) {
+      relation = 'conflict';
     } else {
-      const localTime = new Date(local.updatedAt).getTime();
-      const peerTime = new Date(peer.updatedAt).getTime();
-      if (peerTime > localTime) {
+      const localTime = parseStrictIsoTimestampMs(local.updatedAt);
+      if (localTime === null) {
+        relation = 'conflict';
+      } else if (peerTime > localTime) {
         relation = 'updated';
       } else if (peerTime < localTime) {
         relation = 'local-newer';
@@ -526,24 +636,32 @@ export interface SyncResult {
 /**
  * Compare local manifest against peer's manifest.
  * Returns the IDs we need to request from the peer.
+ * Peer entries with invalid or far-future timestamps are never requested.
  */
 export function computeDiff(
   localManifest: ManifestEntry[],
-  peerManifest: ManifestEntry[]
+  peerManifest: ManifestEntry[],
+  now: number = Date.now()
 ): string[] {
+  const nowMs = resolveNowMs(now);
   const localMap = new Map(localManifest.map((e) => [e.noteId, e]));
   const toRequest: string[] = [];
 
   for (const peerEntry of peerManifest) {
+    const peerTime = parseTrustedTimestampMs(peerEntry.updatedAt, nowMs);
+    if (peerTime === null) {
+      // Untrusted, malformed, or far-future peer timestamp must never win LWW or be requested
+      continue;
+    }
+
     const local = localMap.get(peerEntry.noteId);
     if (!local) {
       // Missing locally — request it
       toRequest.push(peerEntry.noteId);
     } else if (local.contentHash !== peerEntry.contentHash) {
       // Conflict: last-write-wins by updatedAt
-      const localTime = new Date(local.updatedAt).getTime();
-      const peerTime = new Date(peerEntry.updatedAt).getTime();
-      if (peerTime > localTime) {
+      const localTime = parseStrictIsoTimestampMs(local.updatedAt);
+      if (localTime !== null && peerTime > localTime) {
         toRequest.push(peerEntry.noteId);
       }
     }
@@ -605,7 +723,10 @@ export async function compressNote(note: Note): Promise<Uint8Array> {
 }
 
 /** Decompress and validate a Uint8Array to a Note object */
-export async function decompressNote(data: Uint8Array): Promise<Note> {
+export async function decompressNote(
+  data: Uint8Array,
+  now: number = Date.now()
+): Promise<Note> {
   if (!(data instanceof Uint8Array)) {
     throw new Error('Compressed note payload must be a Uint8Array');
   }
@@ -675,7 +796,7 @@ export async function decompressNote(data: Uint8Array): Promise<Note> {
 
   const json = new TextDecoder('utf-8', { fatal: true }).decode(combined);
   const parsed: unknown = JSON.parse(json);
-  return validateNote(parsed);
+  return validateNote(parsed, now);
 }
 
 /** Build the local manifest from the DB */
