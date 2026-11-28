@@ -969,17 +969,23 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
     expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(4);
   });
 
-  it('handles missing, zero, negative, and malformed TTLs safely on both server and client', async () => {
+  it('handles missing, zero, negative, null, string, and malformed TTLs conservatively without caching', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 
-    // Server behavior: invalid string ttl falls back to 10m; explicit ttl <= 0 disables caching
+    // Server behavior: missing, zero, negative, null, string, or malformed ttl disables caching (TTL 0)
     vi.stubEnv('METERED_APP_NAME', 'notebook-app');
     vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
 
     const routeModule = await import('../../app/api/ice-servers/route');
     const upstreamMock = vi
       .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:missing.example.com:3478', username: 'umiss', credential: 'cmiss' }]),
+          { status: 200 },
+        ),
+      )
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify([{ urls: 'turn:zero.example.com:3478', username: 'u0', credential: 'c0', ttl: 0 }]),
@@ -994,21 +1000,64 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
       )
       .mockResolvedValueOnce(
         new Response(
+          JSON.stringify([{ urls: 'turn:nullttl.example.com:3478', username: 'unull', credential: 'cnull', ttl: null }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
           JSON.stringify([{ urls: 'turn:badttl.example.com:3478', username: 'ubad', credential: 'cbad', ttl: 'invalid' }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([{ urls: 'turn:strnum.example.com:3478', username: 'ustr', credential: 'cstr', ttl: '300' }]),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify([
+            { urls: 'turn:valid1.example.com:3478', username: 'u1', credential: 'c1', ttl: 300 },
+            { urls: 'turn:missing2.example.com:3478', username: 'u2', credential: 'c2' },
+          ]),
           { status: 200 },
         ),
       );
 
-    const zeroRes = await routeModule.GET();
-    expect(zeroRes.headers.get('cache-control')).toBe('no-store');
-    expect(zeroRes.headers.get('x-ice-servers-ttl')).toBe('0');
+    for (const expectedUser of ['umiss', 'u0', 'uneg', 'unull', 'ubad', 'ustr', 'u1']) {
+      const res = await routeModule.GET();
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('x-ice-servers-ttl')).toBe('0');
+      const body = (await res.json()) as IceServer[];
+      expect(body[0]?.username).toBe(expectedUser);
+    }
+    expect(upstreamMock).toHaveBeenCalledTimes(7);
 
-    const negRes = await routeModule.GET();
-    expect(negRes.headers.get('x-ice-servers-ttl')).toBe('0');
+    // End-to-end client behavior: missing upstream TTL -> server emits X-Ice-Servers-TTL: 0 -> client does not cache
+    vi.resetModules();
+    vi.restoreAllMocks();
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
 
-    const invalidTtlRes = await routeModule.GET();
-    expect(invalidTtlRes.headers.get('x-ice-servers-ttl')).toBe('600');
-    expect(upstreamMock).toHaveBeenCalledTimes(3);
+    let e2eCall = 0;
+    const freshRouteModule = await import('../../app/api/ice-servers/route');
+    const e2eSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (input === '/api/ice-servers') {
+        return freshRouteModule.GET(new Request('https://notebook.example.com/api/ice-servers', init));
+      }
+      e2eCall++;
+      return new Response(
+        JSON.stringify([{ urls: 'turn:nottl.example.com:3478', username: `u-${e2eCall}`, credential: `c-${e2eCall}` }]),
+        { status: 200 },
+      );
+    });
+
+    const { getIceServers: getClientIceServers } = await import('../turn');
+    expect((await getClientIceServers())[0]?.username).toBe('u-1');
+    expect((await getClientIceServers())[0]?.username).toBe('u-2');
+    expect(e2eSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(2);
 
     // Client behavior: malformed X-Ice-Servers-TTL headers never cache
     vi.resetModules();
@@ -1052,5 +1101,50 @@ describe('client getIceServers() in src/lib/turn.ts', () => {
     );
     expect((await getIceServers())[0]?.username).toBe('u4');
     expect(clientFetchSpy).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the shortest valid TTL across multiple credential entries to govern server and client cache expiry', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+    vi.stubEnv('METERED_APP_NAME', 'notebook-app');
+    vi.stubEnv('METERED_API_KEY', 'valid-secret-key');
+
+    let batch = 0;
+    const routeModule = await import('../../app/api/ice-servers/route');
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      if (input === '/api/ice-servers') {
+        return routeModule.GET(new Request('https://notebook.example.com/api/ice-servers', init));
+      }
+      batch++;
+      return new Response(
+        JSON.stringify([
+          { urls: 'stun:stun.relay.metered.ca:80' },
+          { urls: 'turn:long.example.com:3478', username: `long-${batch}`, credential: 'cl', ttl: 900 },
+          { urls: 'turn:short.example.com:3478', username: `short-${batch}`, credential: 'cs', ttl: 120 },
+        ]),
+        { status: 200 },
+      );
+    });
+
+    const { getIceServers } = await import('../turn');
+
+    // Shortest TTL is 120s -> buffered TTL is 90s (120s - 30s)
+    const first = await getIceServers();
+    expect(first[1]?.username).toBe('long-1');
+    expect(first[2]?.username).toBe('short-1');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(1);
+
+    // At +80s -> still within 90s shortest-TTL window
+    await vi.advanceTimersByTimeAsync(80 * 1000);
+    const second = await getIceServers();
+    expect(second[2]?.username).toBe('short-1');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(1);
+
+    // At +15s (95s total) -> shortest TTL expired before 900s entry -> refreshes both
+    await vi.advanceTimersByTimeAsync(15 * 1000);
+    const third = await getIceServers();
+    expect(third[2]?.username).toBe('short-2');
+    expect(fetchSpy.mock.calls.filter(([url]) => url === '/api/ice-servers').length).toBe(2);
   });
 });

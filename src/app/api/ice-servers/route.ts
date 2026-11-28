@@ -17,9 +17,10 @@
  * - Validates `METERED_APP_NAME` as a strict DNS label, disables HTTP redirects
  *   (`redirect: 'error'`), bounds response parsing to 64 KB under a 5s timeout,
  *   and sanitizes/deduplicates ICE server entries.
- * - Uses per-instance single-flight request coalescing and bounded memory caching
- *   (<= 10 minutes, clamped to upstream `ttl` minus a 30s safety buffer) solely
- *   to reduce redundant upstream bursts on warm instances.
+ * - Uses per-instance single-flight request coalescing and conservative memory
+ *   caching (only when valid upstream `ttl` data establishes credential
+ *   validity, bounded to `<= 10 minutes` minus a 30s safety buffer and >= 10s)
+ *   solely to reduce redundant upstream bursts on warm instances.
  *   NOTE: Serverless memory is NOT shared across instances or cold starts and does
  *   not provide global rate limiting.
  *
@@ -50,7 +51,7 @@ export const dynamic = 'force-dynamic';
 
 const METERED_APP_NAME_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
 const CONTROL_CHARS_PATTERN = /[\u0000-\u001F\u007F]/;
-const DEFAULT_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const MAX_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes upper cap when upstream TTL is valid
 const MIN_CACHE_TTL_MS = 10 * 1000; // Do not cache credentials with < 10s remaining buffered lifetime
 const CACHE_EXPIRY_BUFFER_MS = 30 * 1000; // Refresh before upstream credential TTL expires
 const UPSTREAM_TIMEOUT_MS = 5_000;
@@ -78,32 +79,49 @@ function jsonNoStore(servers: IceServer[], ttlMs = 0): NextResponse<IceServer[]>
   });
 }
 
+function isValidServerPayloadItem(item: unknown): item is Record<string, unknown> {
+  return sanitizeIceServers([item]).length === 1;
+}
+
+function requiresCredentialTtl(item: Record<string, unknown>): boolean {
+  if (Object.hasOwn(item, 'username') || Object.hasOwn(item, 'credential')) {
+    return true;
+  }
+  const urls = item.urls;
+  const uriList = typeof urls === 'string' ? [urls] : Array.isArray(urls) ? urls : [];
+  return uriList.some((uri) => typeof uri === 'string' && /^turns?:/i.test(uri));
+}
+
 function resolveCacheTtlMs(payload: unknown): number {
   if (!Array.isArray(payload)) {
-    return DEFAULT_CACHE_TTL_MS;
+    return 0;
   }
 
   let minUpstreamTtlSeconds: number | null = null;
   for (const item of payload) {
-    if (
-      typeof item === 'object' &&
-      item !== null &&
-      !Array.isArray(item) &&
-      Object.hasOwn(item, 'ttl')
-    ) {
-      const rawTtl = (item as Record<string, unknown>).ttl;
-      if (typeof rawTtl === 'number' && Number.isFinite(rawTtl)) {
-        if (rawTtl <= 0) {
-          return 0;
-        }
-        minUpstreamTtlSeconds =
-          minUpstreamTtlSeconds === null ? rawTtl : Math.min(minUpstreamTtlSeconds, rawTtl);
-      }
+    if (!isValidServerPayloadItem(item)) {
+      continue;
     }
+
+    const hasTtlField = Object.hasOwn(item, 'ttl') && item.ttl !== undefined;
+    if (!hasTtlField) {
+      if (requiresCredentialTtl(item)) {
+        return 0;
+      }
+      continue;
+    }
+
+    const rawTtl = item.ttl;
+    if (typeof rawTtl !== 'number' || !Number.isFinite(rawTtl) || rawTtl <= 0) {
+      return 0;
+    }
+
+    minUpstreamTtlSeconds =
+      minUpstreamTtlSeconds === null ? rawTtl : Math.min(minUpstreamTtlSeconds, rawTtl);
   }
 
   if (minUpstreamTtlSeconds === null) {
-    return DEFAULT_CACHE_TTL_MS;
+    return 0;
   }
 
   const bufferedMs = minUpstreamTtlSeconds * 1000 - CACHE_EXPIRY_BUFFER_MS;
@@ -111,7 +129,7 @@ function resolveCacheTtlMs(payload: unknown): number {
     return 0;
   }
 
-  return Math.min(DEFAULT_CACHE_TTL_MS, bufferedMs);
+  return Math.min(MAX_CACHE_TTL_MS, bufferedMs);
 }
 
 function appendUniqueFallbacks(validServers: IceServer[]): IceServer[] {
