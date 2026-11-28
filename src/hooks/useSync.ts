@@ -3,218 +3,82 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { db, type Pairing, type Tombstone } from '@/lib/db';
 import {
-  applyRemoteTombstone,
-  persistIncomingNote,
+  buildLocalManifest,
+  computeDiff,
+  computeManifestDigest,
+  countUnchangedNotes,
+  type ManifestEntry,
+} from '@/lib/sync';
+import {
   prepareDeletionDeliveries,
   reconcileInterruptedDeletionDeliveries,
   updateTombstoneDelivery,
 } from '@/lib/tombstones';
 import {
-  buildLocalManifest,
-  classifyPeerNotes,
-  compressNote,
-  computeDiff,
-  computeManifestDigest,
-  countUnchangedNotes,
-  decompressNote,
-  parseSyncMessage,
-  type ManifestEntry,
-  type PeerNotePreview,
-} from '@/lib/sync';
-import { computeContentHash } from '@/lib/hash';
-import { getIceServers, type IceServer } from '@/lib/turn';
+  AUTO_SYNC_DEBOUNCE_MS,
+  AUTO_SYNC_STORAGE_KEY,
+  MANIFEST_PREVIEW_TIMEOUT_MS,
+  STATUS_RESET_DELAY_MS,
+  SYNC_TIMEOUT_MS,
+} from './sync/constants';
+import { handleIncomingSyncMessage } from './sync/messageHandlers';
+import {
+  joinPairingRoom,
+  leavePairingRoom,
+  waitForConnectedPeers,
+} from './sync/roomManager';
+import {
+  cancelAutoSyncForPeerState,
+  cleanupAllSyncResources,
+  clearPendingPreview,
+  failPendingDeletionAcksForPeer,
+  failPendingManualTransfersForPeer,
+  pruneStaleBookkeeping as pruneBookkeepingMaps,
+} from './sync/sessionManager';
+import type {
+  ActiveSyncRun,
+  AutoSyncRun,
+  CachedTransferAck,
+  InboundResponderSession,
+  ManualPreviewState,
+  OutboundResponderSession,
+  PeerRunState,
+  PeerState,
+  PendingAckEntry,
+  PendingDeletionAck,
+  PendingPreviewRequest,
+  RoomEntry,
+  SyncStatus,
+} from './sync/types';
+import {
+  buildPeerAutoSyncRecord,
+  computeSyncedAutoDigest,
+  createPeerRunState,
+  deletionAckKey,
+  isPeerRunComplete,
+  peerCompositeKey,
+  summarizeManualRun,
+} from './sync/utils';
 
-export type PeerState = {
-  pairingId: string;
-  peerId: string;
-};
-
-export type SyncStatus =
-  | { stage: 'idle' }
-  | { stage: 'connecting' }
-  | { stage: 'exchanging' }
-  | { stage: 'transferring'; progress: number; total: number }
-  | { stage: 'done'; result: { received: number; sent: number; unchanged: number } }
-  | { stage: 'error'; message: string };
-
-export type ManualPreviewState =
-  | { stage: 'idle' }
-  | { stage: 'loading'; pairingId: string; peerId: string }
-  | {
-      stage: 'ready';
-      pairingId: string;
-      peerId: string;
-      peerManifestSessionId: string;
-      peerManifest: ManifestEntry[];
-      notes: PeerNotePreview[];
-    }
-  | { stage: 'disconnected'; pairingId: string; message: string }
-  | { stage: 'error'; pairingId: string; message: string };
-
-const APP_ID = 'notebook-p2p-sync-v1';
-const AUTO_SYNC_STORAGE_KEY = 'nb-auto-sync';
-export const SYNC_TIMEOUT_MS = 15_000;
-export const MANIFEST_PREVIEW_TIMEOUT_MS = 10_000;
-export const AUTO_SYNC_DEBOUNCE_MS = 400;
-const SESSION_TTL_MS = 60_000;
-const CONNECT_WAIT_TIMEOUT_MS = 5_000;
-const CONNECT_POLL_INTERVAL_MS = 250;
-const STATUS_RESET_DELAY_MS = 5_000;
-
-interface TrysteroAction {
-  send: (data: unknown, options?: { target?: string | string[] }) => Promise<void>;
-  onMessage: ((data: unknown, context: { peerId: string }) => void) | null;
-}
-
-interface TrysteroRoom {
-  onPeerJoin: ((peerId: string) => void) | null;
-  onPeerLeave: ((peerId: string) => void) | null;
-  makeAction: (name: string) => TrysteroAction;
-  leave: () => Promise<void>;
-}
-
-interface TrysteroModule {
-  joinRoom: (
-    config: { appId: string; turnConfig?: IceServer[] },
-    roomId: string
-  ) => TrysteroRoom;
-}
-
-async function getTrystero(): Promise<TrysteroModule> {
-  const mod = await import('@trystero-p2p/torrent');
-  return mod as unknown as TrysteroModule;
-}
-
-interface RoomEntry {
-  room: TrysteroRoom;
-  send: (data: unknown, targetPeerId?: string) => Promise<void>;
-}
-
-interface PeerRunState {
-  key: string;
-  pairingId: string;
-  peerId: string;
-  mode: 'manual-all' | 'manual-selected' | 'auto';
-  outboundSessionId: string | null;
-  inboundSessionId: string | null;
-  localManifest: ManifestEntry[];
-  allowedOutboundIds: Set<string>;
-  allowedIncomingIds: Set<string> | null;
-  outboundRequestReceived: boolean;
-  outboundSendingInProgress: boolean;
-  inboundManifestReceived: boolean;
-  pendingOutgoing: Map<string, string>; // transferId -> noteId
-  pendingIncomingIds: Set<string>;
-  syncedIncomingEntries: Map<string, ManifestEntry>;
-  sentCount: number;
-  receivedCount: number;
-  failedCount: number;
-  unchangedCount: number;
-  disconnected: boolean;
-  done: boolean;
-}
-
-interface ActiveSyncRun {
-  runId: string;
-  peers: Map<string, PeerRunState>;
-  timeoutId: ReturnType<typeof setTimeout> | null;
-  settled: boolean;
-}
-
-interface AutoSyncRun {
-  runId: string;
-  peer: PeerRunState;
-  timeoutId: ReturnType<typeof setTimeout> | null;
-  settled: boolean;
-}
-
-interface PendingPreviewRequest {
-  sessionId: string;
-  pairingId: string;
-  peerId: string;
-  timeoutId: ReturnType<typeof setTimeout> | null;
-}
-
-interface OutboundResponderSession {
-  pairingId: string;
-  peerId: string;
-  allowedNoteIds: Set<string>;
-  requestHandled: boolean;
-  isAutoSync: boolean;
-  createdAt: number;
-}
-
-interface InboundResponderSession {
-  sessionId: string;
-  pairingId: string;
-  peerId: string;
-  allowedNoteIds: Set<string>;
-  pendingNoteIds: Set<string>;
-  isAutoSync: boolean;
-  createdAt: number;
-  expiresAt: number;
-  timeoutId: ReturnType<typeof setTimeout> | null;
-}
-
-interface PendingAckEntry {
-  sessionId: string;
-  pairingId: string;
-  peerId: string;
-  noteId: string;
-  runType: 'manual' | 'auto' | 'responder';
-  runId: string | null;
-  createdAt: number;
-}
-
-interface CachedTransferAck {
-  ok: boolean;
-  noteId: string;
-  error?: string;
-  createdAt: number;
-}
-
-interface PendingDeletionAck {
-  pairingId: string;
-  peerId: string;
-  tombstone: Tombstone;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
-function peerCompositeKey(pairingId: string, peerId: string): string {
-  return `${pairingId}\x00${peerId}`;
-}
-
-function deletionAckKey(pairingId: string, peerId: string, deletionId: string): string {
-  return `${peerCompositeKey(pairingId, peerId)}\x00${deletionId}`;
-}
-
-function isPeerRunComplete(peerRun: PeerRunState): boolean {
-  return (
-    peerRun.disconnected ||
-    (peerRun.outboundRequestReceived &&
-      !peerRun.outboundSendingInProgress &&
-      peerRun.inboundManifestReceived &&
-      peerRun.pendingOutgoing.size === 0 &&
-      peerRun.pendingIncomingIds.size === 0)
-  );
-}
+export { AUTO_SYNC_DEBOUNCE_MS, SYNC_TIMEOUT_MS } from './sync/constants';
+export type { ManualPreviewState, PeerState, SyncStatus } from './sync/types';
 
 export function useSync(onNotesChanged: () => void) {
   const [pairings, setPairings] = useState<Pairing[]>([]);
   const [connectedPeers, setConnectedPeers] = useState<PeerState[]>([]);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ stage: 'idle' });
-  const [autoSyncEnabled, setAutoSyncEnabledState] = useState<boolean>(false);
+  const [autoSyncEnabled, setAutoSyncEnabledState] = useState(false);
   const [peerAutoSync, setPeerAutoSync] = useState<Record<string, boolean>>({});
   const [manualPreview, setManualPreview] = useState<ManualPreviewState>({ stage: 'idle' });
 
   const roomsRef = useRef<Map<string, RoomEntry>>(new Map());
   const pendingJoinsRef = useRef<Map<string, Promise<void>>>(new Map());
   const desiredRoomsRef = useRef<Set<string>>(new Set());
-  const isUnmountedRef = useRef(false);
   const connectedPeersRef = useRef<PeerState[]>([]);
   const onNotesChangedRef = useRef(onNotesChanged);
+  const isUnmountedRef = useRef(false);
 
-  const autoSyncEnabledRef = useRef<boolean>(false);
+  const autoSyncEnabledRef = useRef(false);
   const peerAutoSyncRef = useRef<Map<string, boolean>>(new Map());
   const autoRunsRef = useRef<Map<string, AutoSyncRun>>(new Map());
   const startingAutoRunsRef = useRef<Set<string>>(new Set());
@@ -259,87 +123,39 @@ export function useSync(onNotesChanged: () => void) {
   );
 
   const clearPreviewRequest = useCallback(() => {
-    const pending = pendingPreviewRef.current;
-    if (pending?.timeoutId !== null && pending?.timeoutId !== undefined) {
-      clearTimeout(pending.timeoutId);
-    }
-    pendingPreviewRef.current = null;
+    clearPendingPreview(
+      () => pendingPreviewRef.current,
+      (next) => {
+        pendingPreviewRef.current = next;
+      }
+    );
   }, []);
 
   const cancelAutoSyncForPeer = useCallback((key: string) => {
-    const timer = autoDebounceTimersRef.current.get(key);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      autoDebounceTimersRef.current.delete(key);
-    }
-    autoPendingResyncRef.current.delete(key);
-    lastAutoSyncedDigestRef.current.delete(key);
-
-    const autoRun = autoRunsRef.current.get(key);
-    if (autoRun) {
-      autoRun.settled = true;
-      if (autoRun.timeoutId !== null) {
-        clearTimeout(autoRun.timeoutId);
-        autoRun.timeoutId = null;
-      }
-      autoRunsRef.current.delete(key);
-      for (const [transferId, entry] of pendingAcksRef.current) {
-        if (entry.runType === 'auto' && entry.runId === autoRun.runId) {
-          pendingAcksRef.current.delete(transferId);
-        }
-      }
-    }
-
-    for (const [rKey, session] of inboundRespondersRef.current) {
-      if (session.isAutoSync && peerCompositeKey(session.pairingId, session.peerId) === key) {
-        if (session.timeoutId !== null) {
-          clearTimeout(session.timeoutId);
-        }
-        inboundRespondersRef.current.delete(rKey);
-      }
-    }
-    for (const [sId, session] of outboundRespondersRef.current) {
-      if (session.isAutoSync && peerCompositeKey(session.pairingId, session.peerId) === key) {
-        outboundRespondersRef.current.delete(sId);
-      }
-    }
+    cancelAutoSyncForPeerState(key, {
+      autoDebounceTimers: autoDebounceTimersRef.current,
+      autoPendingResync: autoPendingResyncRef.current,
+      lastAutoSyncedDigest: lastAutoSyncedDigestRef.current,
+      autoRuns: autoRunsRef.current,
+      pendingAcks: pendingAcksRef.current,
+      inboundResponders: inboundRespondersRef.current,
+      outboundResponders: outboundRespondersRef.current,
+    });
   }, []);
 
   const pruneStaleBookkeeping = useCallback(() => {
-    const now = Date.now();
-    const cutoff = now - SESSION_TTL_MS;
-    for (const [k, ts] of processedManifestSessionsRef.current) {
-      if (ts < cutoff) processedManifestSessionsRef.current.delete(k);
-    }
-    for (const [k, session] of outboundRespondersRef.current) {
-      if (session.createdAt < cutoff) outboundRespondersRef.current.delete(k);
-    }
-    for (const [k, session] of inboundRespondersRef.current) {
-      if (session.expiresAt < now) {
-        if (session.timeoutId !== null) {
-          clearTimeout(session.timeoutId);
-        }
-        inboundRespondersRef.current.delete(k);
-      }
-    }
-    for (const [k, entry] of pendingAcksRef.current) {
-      const activeAuto = Array.from(autoRunsRef.current.values()).some(
-        (r) => r.runId === entry.runId
-      );
-      if (
-        entry.createdAt < cutoff &&
-        entry.runId !== activeRunRef.current?.runId &&
-        !activeAuto
-      ) {
-        pendingAcksRef.current.delete(k);
-      }
-    }
-    for (const [k, cached] of processedIncomingTransfersRef.current) {
-      if (cached.createdAt < cutoff) processedIncomingTransfersRef.current.delete(k);
-    }
-    for (const [k, ts] of handledNoteErrorsRef.current) {
-      if (ts < cutoff) handledNoteErrorsRef.current.delete(k);
-    }
+    pruneBookkeepingMaps(
+      {
+        processedManifestSessions: processedManifestSessionsRef.current,
+        outboundResponders: outboundRespondersRef.current,
+        inboundResponders: inboundRespondersRef.current,
+        pendingAcks: pendingAcksRef.current,
+        processedIncomingTransfers: processedIncomingTransfersRef.current,
+        handledNoteErrors: handledNoteErrorsRef.current,
+      },
+      activeRunRef.current?.runId ?? null,
+      autoRunsRef.current
+    );
   }, []);
 
   const sendForPairing = useCallback(
@@ -558,8 +374,7 @@ export function useSync(onNotesChanged: () => void) {
 
           const runId = crypto.randomUUID();
           const outboundSessionId = crypto.randomUUID();
-
-          const peerRun: PeerRunState = {
+          const peerRun = createPeerRunState({
             key,
             pairingId,
             peerId,
@@ -567,21 +382,7 @@ export function useSync(onNotesChanged: () => void) {
             outboundSessionId,
             inboundSessionId: null,
             localManifest,
-            allowedOutboundIds: new Set(localManifest.map((e) => e.noteId)),
-            allowedIncomingIds: null,
-            outboundRequestReceived: false,
-            outboundSendingInProgress: false,
-            inboundManifestReceived: false,
-            pendingOutgoing: new Map(),
-            pendingIncomingIds: new Set(),
-            syncedIncomingEntries: new Map(),
-            sentCount: 0,
-            receivedCount: 0,
-            failedCount: 0,
-            unchangedCount: 0,
-            disconnected: false,
-            done: false,
-          };
+          });
 
           const autoRun: AutoSyncRun = {
             runId,
@@ -630,29 +431,7 @@ export function useSync(onNotesChanged: () => void) {
     (run: ActiveSyncRun) => {
       if (run.settled || activeRunRef.current !== run) return;
 
-      let received = 0;
-      let sent = 0;
-      let failed = 0;
-      let unchanged = 0;
-      let pending = 0;
-      let allDone = true;
-
-      for (const peerRun of run.peers.values()) {
-        if (!peerRun.done && isPeerRunComplete(peerRun)) {
-          peerRun.done = true;
-        }
-
-        if (!peerRun.done) {
-          allDone = false;
-        }
-
-        received += peerRun.receivedCount;
-        sent += peerRun.sentCount;
-        failed += peerRun.failedCount;
-        unchanged += peerRun.unchangedCount;
-        pending += peerRun.pendingOutgoing.size + peerRun.pendingIncomingIds.size;
-      }
-
+      const { allDone, received, sent, failed, unchanged, pending } = summarizeManualRun(run);
       const completedTransfers = received + sent + failed;
       const totalTransfers = completedTransfers + pending;
 
@@ -708,49 +487,45 @@ export function useSync(onNotesChanged: () => void) {
     [scheduleIdleReset, startAutoSyncForPeer]
   );
 
-  const evaluateAutoRunCompletion = useCallback((autoRun: AutoSyncRun) => {
-    const peerRun = autoRun.peer;
-    if (autoRun.settled || autoRunsRef.current.get(peerRun.key) !== autoRun) return;
+  const evaluateAutoRunCompletion = useCallback(
+    (autoRun: AutoSyncRun) => {
+      const peerRun = autoRun.peer;
+      if (autoRun.settled || autoRunsRef.current.get(peerRun.key) !== autoRun) return;
 
-    if (!isPeerRunComplete(peerRun)) return;
+      if (!isPeerRunComplete(peerRun)) return;
 
-    peerRun.done = true;
-    autoRun.settled = true;
-    if (autoRun.timeoutId !== null) {
-      clearTimeout(autoRun.timeoutId);
-      autoRun.timeoutId = null;
-    }
-    autoRunsRef.current.delete(peerRun.key);
-
-    for (const [transferId, entry] of pendingAcksRef.current) {
-      if (entry.runType === 'auto' && entry.runId === autoRun.runId) {
-        pendingAcksRef.current.delete(transferId);
+      peerRun.done = true;
+      autoRun.settled = true;
+      if (autoRun.timeoutId !== null) {
+        clearTimeout(autoRun.timeoutId);
+        autoRun.timeoutId = null;
       }
-    }
+      autoRunsRef.current.delete(peerRun.key);
 
-    // Record only the manifest state actually synchronized by this run (its initial snapshot
-    // merged with notes received and persisted during this exchange), never post-snapshot edits.
-    if (peerRun.failedCount === 0 && !peerRun.disconnected) {
-      const syncedMap = new Map(peerRun.localManifest.map((e) => [e.noteId, e]));
-      for (const [noteId, entry] of peerRun.syncedIncomingEntries) {
-        syncedMap.set(noteId, entry);
+      for (const [transferId, entry] of pendingAcksRef.current) {
+        if (entry.runType === 'auto' && entry.runId === autoRun.runId) {
+          pendingAcksRef.current.delete(transferId);
+        }
       }
-      lastAutoSyncedDigestRef.current.set(
-        peerRun.key,
-        computeManifestDigest(Array.from(syncedMap.values()))
-      );
-    }
 
-    if (
-      !isUnmountedRef.current &&
-      autoPendingResyncRef.current.has(peerRun.key) &&
-      autoSyncEnabledRef.current &&
-      peerAutoSyncRef.current.get(peerRun.key) === true
-    ) {
-      autoPendingResyncRef.current.delete(peerRun.key);
-      void startAutoSyncForPeer(peerRun.pairingId, peerRun.peerId, 'local-change');
-    }
-  }, [startAutoSyncForPeer]);
+      // Record only the manifest state actually synchronized by this run (its initial snapshot
+      // merged with notes received and persisted during this exchange), never post-snapshot edits.
+      if (peerRun.failedCount === 0 && !peerRun.disconnected) {
+        lastAutoSyncedDigestRef.current.set(peerRun.key, computeSyncedAutoDigest(peerRun));
+      }
+
+      if (
+        !isUnmountedRef.current &&
+        autoPendingResyncRef.current.has(peerRun.key) &&
+        autoSyncEnabledRef.current &&
+        peerAutoSyncRef.current.get(peerRun.key) === true
+      ) {
+        autoPendingResyncRef.current.delete(peerRun.key);
+        void startAutoSyncForPeer(peerRun.pairingId, peerRun.peerId, 'local-change');
+      }
+    },
+    [startAutoSyncForPeer]
+  );
 
   useEffect(() => {
     evaluateAutoRunCompletionRef.current = evaluateAutoRunCompletion;
@@ -784,7 +559,6 @@ export function useSync(onNotesChanged: () => void) {
 
   const handlePeerDisconnected = useCallback(
     (pairingId: string, peerId?: string) => {
-      // Cancel pending preview if it targeted this pairing/peer
       const pendingPreview = pendingPreviewRef.current;
       if (
         pendingPreview &&
@@ -816,7 +590,6 @@ export function useSync(onNotesChanged: () => void) {
         });
       }
 
-      // Clean up auto-sync state for disconnected peer(s)
       for (const [key] of Array.from(peerAutoSyncRef.current.entries())) {
         const [pId, rPeerId] = key.split('\x00');
         if (pId === pairingId && (peerId === undefined || rPeerId === peerId)) {
@@ -828,7 +601,6 @@ export function useSync(onNotesChanged: () => void) {
         cancelAutoSyncForPeer(peerCompositeKey(pairingId, peerId));
       }
 
-      // Cancel any responder sessions and pending ACKs for disconnected peer(s)
       for (const [rKey, session] of inboundRespondersRef.current) {
         if (
           session.pairingId === pairingId &&
@@ -856,81 +628,19 @@ export function useSync(onNotesChanged: () => void) {
           pendingAcksRef.current.delete(transferId);
         }
       }
-      for (const [key, pending] of Array.from(pendingDeletionAcksRef.current.entries())) {
-        if (
-          pending.pairingId === pairingId &&
-          (peerId === undefined || pending.peerId === peerId)
-        ) {
-          clearTimeout(pending.timeoutId);
-          pendingDeletionAcksRef.current.delete(key);
-          void updateTombstoneDelivery(
-            pending.tombstone,
-            { pairingId: pending.pairingId, peerId: pending.peerId },
-            'failed'
-          ).catch((err) => {
-            console.warn('Failed to record deletion delivery failure:', err);
-          });
-        }
-      }
+
+      failPendingDeletionAcksForPeer(pendingDeletionAcksRef.current, pairingId, peerId);
+
       if (!isUnmountedRef.current) {
-        const nextMap: Record<string, boolean> = {};
-        for (const [k, val] of peerAutoSyncRef.current) {
-          nextMap[k] = val;
-        }
-        setPeerAutoSync(nextMap);
+        setPeerAutoSync(buildPeerAutoSyncRecord(peerAutoSyncRef.current));
       }
 
-      // Fail pending manual run transfers for disconnected peer(s)
       const run = activeRunRef.current;
-      if (!run || run.settled) return;
-
-      let touched = false;
-      for (const peerRun of run.peers.values()) {
-        if (peerRun.pairingId !== pairingId) continue;
-        if (peerId !== undefined && peerRun.peerId !== peerId) continue;
-        if (peerRun.done) continue;
-
-        const pendingCount =
-          peerRun.pendingOutgoing.size + peerRun.pendingIncomingIds.size;
-        peerRun.failedCount += pendingCount > 0 ? pendingCount : 1;
-
-        for (const transferId of peerRun.pendingOutgoing.keys()) {
-          pendingAcksRef.current.delete(transferId);
-        }
-        peerRun.pendingOutgoing.clear();
-        peerRun.pendingIncomingIds.clear();
-        peerRun.disconnected = true;
-        peerRun.done = true;
-        touched = true;
-      }
-
-      if (touched) {
+      if (run && failPendingManualTransfersForPeer(run, pairingId, peerId, pendingAcksRef.current)) {
         evaluateManualRunCompletion(run);
       }
     },
     [cancelAutoSyncForPeer, clearPreviewRequest, evaluateManualRunCompletion]
-  );
-
-  // Find active peerRun (either manual or auto) matching peerKey and predicate
-  const findPeerRunForSession = useCallback(
-    (
-      key: string,
-      predicate: (peerRun: PeerRunState) => boolean
-    ): { kind: 'manual'; run: ActiveSyncRun; peerRun: PeerRunState } | { kind: 'auto'; autoRun: AutoSyncRun; peerRun: PeerRunState } | null => {
-      const manualRun = activeRunRef.current;
-      if (manualRun && !manualRun.settled) {
-        const manualPeer = manualRun.peers.get(key);
-        if (manualPeer && predicate(manualPeer)) {
-          return { kind: 'manual', run: manualRun, peerRun: manualPeer };
-        }
-      }
-      const autoRun = autoRunsRef.current.get(key);
-      if (autoRun && !autoRun.settled && predicate(autoRun.peer)) {
-        return { kind: 'auto', autoRun, peerRun: autoRun.peer };
-      }
-      return null;
-    },
-    []
   );
 
   const notifyRunCompletion = useCallback(
@@ -944,911 +654,97 @@ export function useSync(onNotesChanged: () => void) {
     [evaluateAutoRunCompletion, evaluateManualRunCompletion]
   );
 
-  // Join a Trystero room for a pairing
   const joinRoom = useCallback(
-    (pairing: Pairing): Promise<void> => {
-      desiredRoomsRef.current.add(pairing.id);
-
-      if (isUnmountedRef.current || roomsRef.current.has(pairing.id)) {
-        return Promise.resolve();
-      }
-
-      const existingJoin = pendingJoinsRef.current.get(pairing.id);
-      if (existingJoin) {
-        return existingJoin;
-      }
-
-      let joinPromise: Promise<void> | null = null;
-      joinPromise = (async () => {
-        try {
-          const iceServers = await getIceServers();
-          if (isUnmountedRef.current || !desiredRoomsRef.current.has(pairing.id)) {
+    (pairing: Pairing): Promise<void> =>
+      joinPairingRoom({
+        pairing,
+        rooms: roomsRef.current,
+        pendingJoins: pendingJoinsRef.current,
+        desiredRooms: desiredRoomsRef.current,
+        isUnmounted: () => isUnmountedRef.current,
+        onPeerJoin: (pairingId, entry, peerId) => {
+          if (
+            isUnmountedRef.current ||
+            roomsRef.current.get(pairingId) !== entry ||
+            !desiredRoomsRef.current.has(pairingId)
+          ) {
             return;
           }
-
-          const trystero = await getTrystero();
-          if (isUnmountedRef.current || !desiredRoomsRef.current.has(pairing.id)) {
-            return;
-          }
-
-          const room = trystero.joinRoom(
-            {
-              appId: APP_ID,
-              turnConfig: iceServers,
-            },
-            pairing.id
+          const alreadyConnected = connectedPeersRef.current.some(
+            (p) => p.pairingId === pairingId && p.peerId === peerId
           );
-
-          if (isUnmountedRef.current || !desiredRoomsRef.current.has(pairing.id)) {
-            try {
-              await room.leave?.();
-            } catch {}
-            return;
-          }
-
-          const syncAction = room.makeAction('sync');
-
-          const sendData = async (data: unknown, targetPeerId?: string) => {
-            await syncAction.send(
-              data,
-              targetPeerId ? { target: targetPeerId } : undefined
-            );
-          };
-
-          const entry: RoomEntry = { room, send: sendData };
-          roomsRef.current.set(pairing.id, entry);
-
-          room.onPeerJoin = (peerId: string) => {
-            if (
-              isUnmountedRef.current ||
-              roomsRef.current.get(pairing.id) !== entry ||
-              !desiredRoomsRef.current.has(pairing.id)
-            ) {
-              return;
-            }
-            const alreadyConnected = connectedPeersRef.current.some(
-              (p) => p.pairingId === pairing.id && p.peerId === peerId
-            );
-            if (!alreadyConnected) {
-              const next = [...connectedPeersRef.current, { pairingId: pairing.id, peerId }];
-              connectedPeersRef.current = next;
-              setConnectedPeers(next);
-            }
-            // Announce local auto-sync preference on peer join / reconnection
-            void sendForPairing(
-              pairing.id,
-              { type: 'auto-sync-pref', enabled: autoSyncEnabledRef.current },
-              peerId
-            );
-          };
-
-          room.onPeerLeave = (peerId: string) => {
-            if (roomsRef.current.get(pairing.id) !== entry) return;
-            const next = connectedPeersRef.current.filter(
-              (p) => !(p.pairingId === pairing.id && p.peerId === peerId)
-            );
+          if (!alreadyConnected) {
+            const next = [...connectedPeersRef.current, { pairingId, peerId }];
             connectedPeersRef.current = next;
-            if (!isUnmountedRef.current) {
-              setConnectedPeers(next);
-            }
-            handlePeerDisconnected(pairing.id, peerId);
-          };
-
-          // Handle incoming sync messages
-          // NOTE: onMessage must NOT be async directly to avoid message channel closing warnings
-          syncAction.onMessage = (data: unknown, { peerId }: { peerId: string }) => {
-            if (
-              isUnmountedRef.current ||
-              roomsRef.current.get(pairing.id) !== entry ||
-              !desiredRoomsRef.current.has(pairing.id)
-            ) {
-              return;
-            }
-
-            void (async () => {
-              try {
-                pruneStaleBookkeeping();
-                const msg = parseSyncMessage(data);
-                if (!msg) {
-                  console.warn('Ignoring invalid sync message from peer:', peerId);
-                  return;
-                }
-
-                const key = peerCompositeKey(pairing.id, peerId);
-
-                // Trust boundary: a currently connected peer in an established, active
-                // pairing room may send deletions independently of an active note-sync
-                // session so online deletes propagate immediately. Unpaired, disconnected,
-                // or undesired-room peers are always rejected.
-                if (msg.type === 'tombstone') {
-                  const isEstablishedPeer = connectedPeersRef.current.some(
-                    (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
-                  );
-                  if (
-                    !isEstablishedPeer ||
-                    roomsRef.current.get(pairing.id) !== entry ||
-                    !desiredRoomsRef.current.has(pairing.id)
-                  ) {
-                    console.warn('Rejecting deletion from an unpaired or disconnected peer:', peerId);
-                    return;
-                  }
-                  const result = await applyRemoteTombstone(msg);
-                  if (result.removedNote) onNotesChangedRef.current();
-                  if (result.outcome === 'invalid') return;
-                  if (
-                    connectedPeersRef.current.some(
-                      (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
-                    ) &&
-                    roomsRef.current.get(pairing.id) === entry &&
-                    desiredRoomsRef.current.has(pairing.id)
-                  ) {
-                    await sendForPairing(
-                      pairing.id,
-                      {
-                        type: 'tombstone-ack',
-                        noteId: msg.noteId,
-                        deletionId: msg.deletionId,
-                        outcome: result.outcome,
-                      },
-                      peerId
-                    );
-                  }
-                  return;
-                }
-
-                if (msg.type === 'tombstone-ack') {
-                  const isEstablishedPeer = connectedPeersRef.current.some(
-                    (peer) => peer.pairingId === pairing.id && peer.peerId === peerId
-                  );
-                  if (
-                    !isEstablishedPeer ||
-                    roomsRef.current.get(pairing.id) !== entry ||
-                    !desiredRoomsRef.current.has(pairing.id)
-                  ) {
-                    return;
-                  }
-                  const ackKey = deletionAckKey(pairing.id, peerId, msg.deletionId);
-                  const pending = pendingDeletionAcksRef.current.get(ackKey);
-                  if (!pending || pending.tombstone.noteId !== msg.noteId) return;
-                  clearTimeout(pending.timeoutId);
-                  pendingDeletionAcksRef.current.delete(ackKey);
-                  await updateTombstoneDelivery(
-                    pending.tombstone,
-                    { pairingId: pairing.id, peerId },
-                    msg.outcome === 'superseded' ? 'superseded' : 'accepted'
-                  );
-                  return;
-                }
-
-                // Capability exchange: peer's Auto-sync preference
-                if (msg.type === 'auto-sync-pref') {
-                  peerAutoSyncRef.current.set(key, msg.enabled);
-                  if (!isUnmountedRef.current) {
-                    setPeerAutoSync((prev) => ({ ...prev, [key]: msg.enabled }));
-                  }
-
-                  if (!msg.enabled) {
-                    cancelAutoSyncForPeer(key);
-                  } else if (autoSyncEnabledRef.current) {
-                    void startAutoSyncForPeer(pairing.id, peerId, 'handshake');
-                  }
-                  return;
-                }
-
-                // Manual preview query: return fresh manifest without requesting or sending notes
-                if (msg.type === 'manifest-request') {
-                  const localManifest = await buildLocalManifest(db);
-                  const replySessionId = crypto.randomUUID();
-                  outboundRespondersRef.current.set(replySessionId, {
-                    pairingId: pairing.id,
-                    peerId,
-                    allowedNoteIds: new Set(localManifest.map((e) => e.noteId)),
-                    requestHandled: false,
-                    isAutoSync: false,
-                    createdAt: Date.now(),
-                  });
-                  await sendForPairing(
-                    pairing.id,
-                    {
-                      type: 'manifest',
-                      sessionId: replySessionId,
-                      inReplyTo: msg.sessionId,
-                      entries: localManifest,
-                      wantsManifest: false,
-                      previewOnly: true,
-                    },
-                    peerId
-                  );
-                  return;
-                }
-
-                // Phase 1: Peer sends manifest
-                if (msg.type === 'manifest') {
-                  if (!msg.sessionId) {
-                    console.warn('Ignoring manifest without sessionId from peer:', peerId);
-                    return;
-                  }
-
-                  // Handle preview-only manifest replies strictly for the matching pending preview request
-                  if (msg.previewOnly === true) {
-                    const pendingPreview = pendingPreviewRef.current;
-                    if (
-                      !pendingPreview ||
-                      pendingPreview.sessionId !== msg.inReplyTo ||
-                      pendingPreview.pairingId !== pairing.id ||
-                      pendingPreview.peerId !== peerId
-                    ) {
-                      return;
-                    }
-                    clearPreviewRequest();
-                    const localManifest = await buildLocalManifest(db);
-                    if (!isUnmountedRef.current) {
-                      setManualPreview({
-                        stage: 'ready',
-                        pairingId: pairing.id,
-                        peerId,
-                        peerManifestSessionId: msg.sessionId,
-                        peerManifest: msg.entries,
-                        notes: classifyPeerNotes(localManifest, msg.entries),
-                      });
-                    }
-                    return;
-                  }
-
-                  const dedupeKey = `${key}\x00${msg.sessionId}`;
-                  if (processedManifestSessionsRef.current.has(dedupeKey)) {
-                    return;
-                  }
-                  processedManifestSessionsRef.current.set(dedupeKey, Date.now());
-
-                  // Match against an active manual or auto run waiting for inbound manifest
-                  const activeMatch = findPeerRunForSession(
-                    key,
-                    (p) => !p.inboundManifestReceived
-                  );
-
-                  if (activeMatch) {
-                    const { peerRun } = activeMatch;
-                    const toRequest = Array.from(
-                      new Set(computeDiff(peerRun.localManifest, msg.entries))
-                    );
-                    const peerNeeds = Array.from(
-                      new Set(computeDiff(msg.entries, peerRun.localManifest))
-                    );
-
-                    peerRun.inboundManifestReceived = true;
-                    peerRun.inboundSessionId = msg.sessionId;
-                    peerRun.allowedIncomingIds = new Set(toRequest);
-                    peerRun.pendingIncomingIds = new Set(toRequest);
-                    peerRun.unchangedCount = countUnchangedNotes(
-                      peerRun.localManifest,
-                      msg.entries,
-                      toRequest,
-                      peerNeeds
-                    );
-
-                    const sentOk = await sendForPairing(
-                      pairing.id,
-                      { type: 'request', sessionId: msg.sessionId, noteIds: toRequest },
-                      peerId
-                    );
-                    if (!sentOk) {
-                      peerRun.failedCount += Math.max(peerRun.pendingIncomingIds.size, 1);
-                      peerRun.pendingIncomingIds.clear();
-                    }
-                    notifyRunCompletion(activeMatch);
-                    return;
-                  }
-
-                  // Passive responder path (remote peer initiated sync)
-                  if (
-                    msg.autoSync === true &&
-                    (!autoSyncEnabledRef.current || peerAutoSyncRef.current.get(key) !== true)
-                  ) {
-                    return;
-                  }
-
-                  const localManifest = await buildLocalManifest(db);
-                  if (
-                    isUnmountedRef.current ||
-                    roomsRef.current.get(pairing.id) !== entry ||
-                    !desiredRoomsRef.current.has(pairing.id) ||
-                    (msg.autoSync === true &&
-                      (!autoSyncEnabledRef.current ||
-                        peerAutoSyncRef.current.get(key) !== true))
-                  ) {
-                    return;
-                  }
-
-                  const toRequest = Array.from(
-                    new Set(computeDiff(localManifest, msg.entries))
-                  );
-
-                  const responderKey = `${key}\x00${msg.sessionId}`;
-                  let createdInboundResponder: InboundResponderSession | null = null;
-                  if (toRequest.length > 0) {
-                    const now = Date.now();
-                    const session: InboundResponderSession = {
-                      sessionId: msg.sessionId,
-                      pairingId: pairing.id,
-                      peerId,
-                      allowedNoteIds: new Set(toRequest),
-                      pendingNoteIds: new Set(toRequest),
-                      isAutoSync: msg.autoSync === true,
-                      createdAt: now,
-                      expiresAt: now + SYNC_TIMEOUT_MS,
-                      timeoutId: null,
-                    };
-                    session.timeoutId = setTimeout(() => {
-                      const current = inboundRespondersRef.current.get(responderKey);
-                      if (current === session) {
-                        inboundRespondersRef.current.delete(responderKey);
-                      }
-                    }, SYNC_TIMEOUT_MS);
-                    inboundRespondersRef.current.set(responderKey, session);
-                    createdInboundResponder = session;
-                  }
-
-                  const reqSentOk = await sendForPairing(
-                    pairing.id,
-                    { type: 'request', sessionId: msg.sessionId, noteIds: toRequest },
-                    peerId
-                  );
-                  if (!reqSentOk && createdInboundResponder) {
-                    const current = inboundRespondersRef.current.get(responderKey);
-                    if (current === createdInboundResponder) {
-                      if (current.timeoutId !== null) {
-                        clearTimeout(current.timeoutId);
-                      }
-                      inboundRespondersRef.current.delete(responderKey);
-                    }
-                  }
-
-                  if (msg.wantsManifest === true) {
-                    const replySessionId = crypto.randomUUID();
-                    outboundRespondersRef.current.set(replySessionId, {
-                      pairingId: pairing.id,
-                      peerId,
-                      allowedNoteIds: new Set(localManifest.map((e) => e.noteId)),
-                      requestHandled: false,
-                      isAutoSync: msg.autoSync === true,
-                      createdAt: Date.now(),
-                    });
-                    await sendForPairing(
-                      pairing.id,
-                      {
-                        type: 'manifest',
-                        sessionId: replySessionId,
-                        inReplyTo: msg.sessionId,
-                        entries: localManifest,
-                        wantsManifest: false,
-                      },
-                      peerId
-                    );
-                  }
-                  return;
-                }
-
-                // Phase 2: Peer requests specific notes for a session
-                if (msg.type === 'request') {
-                  if (!msg.sessionId) {
-                    console.warn('Ignoring request without sessionId from peer:', peerId);
-                    return;
-                  }
-
-                  const activeMatch = findPeerRunForSession(
-                    key,
-                    (p) => p.outboundSessionId === msg.sessionId
-                  );
-                  const responder = !activeMatch
-                    ? outboundRespondersRef.current.get(msg.sessionId)
-                    : undefined;
-                  const isValidResponder =
-                    responder &&
-                    responder.pairingId === pairing.id &&
-                    responder.peerId === peerId;
-
-                  if (!activeMatch && !isValidResponder) {
-                    return;
-                  }
-
-                  let allowedOutboundIds: Set<string>;
-                  if (activeMatch) {
-                    if (activeMatch.peerRun.outboundRequestReceived) return;
-                    activeMatch.peerRun.outboundRequestReceived = true;
-                    activeMatch.peerRun.outboundSendingInProgress = true;
-                    allowedOutboundIds = activeMatch.peerRun.allowedOutboundIds;
-                  } else {
-                    if (responder!.requestHandled) return;
-                    responder!.requestHandled = true;
-                    allowedOutboundIds = responder!.allowedNoteIds;
-                  }
-
-                  const uniqueNoteIds = Array.from(new Set(msg.noteIds));
-
-                  if (uniqueNoteIds.length === 0) {
-                    if (activeMatch) {
-                      activeMatch.peerRun.outboundSendingInProgress = false;
-                      notifyRunCompletion(activeMatch);
-                    }
-                    return;
-                  }
-
-                  try {
-                    for (const noteId of uniqueNoteIds) {
-                      // Prevent requesting arbitrary/unlisted note IDs not advertised in this session's manifest
-                      if (!allowedOutboundIds.has(noteId)) {
-                        await sendForPairing(
-                          pairing.id,
-                          {
-                            type: 'note-error',
-                            sessionId: msg.sessionId,
-                            noteId,
-                            reason: 'Note ID not listed in session manifest',
-                          },
-                          peerId
-                        );
-                        if (activeMatch) {
-                          activeMatch.peerRun.failedCount++;
-                        }
-                        continue;
-                      }
-
-                      const note = await db.notes.get(noteId);
-                      if (!note) {
-                        await sendForPairing(
-                          pairing.id,
-                          {
-                            type: 'note-error',
-                            sessionId: msg.sessionId,
-                            noteId,
-                            reason: 'Note not found',
-                          },
-                          peerId
-                        );
-                        if (activeMatch) {
-                          activeMatch.peerRun.failedCount++;
-                        }
-                        continue;
-                      }
-
-                      try {
-                        const compressed = await compressNote(note);
-                        const transferId = crypto.randomUUID();
-
-                        pendingAcksRef.current.set(transferId, {
-                          sessionId: msg.sessionId,
-                          pairingId: pairing.id,
-                          peerId,
-                          noteId,
-                          runType: activeMatch
-                            ? activeMatch.kind === 'manual'
-                              ? 'manual'
-                              : 'auto'
-                            : 'responder',
-                          runId: activeMatch
-                            ? activeMatch.kind === 'manual'
-                              ? activeMatch.run.runId
-                              : activeMatch.autoRun.runId
-                            : null,
-                          createdAt: Date.now(),
-                        });
-
-                        if (activeMatch) {
-                          activeMatch.peerRun.pendingOutgoing.set(transferId, noteId);
-                          notifyRunCompletion(activeMatch);
-                        }
-
-                        const sentOk = await sendForPairing(
-                          pairing.id,
-                          {
-                            type: 'note',
-                            sessionId: msg.sessionId,
-                            transferId,
-                            noteId,
-                            payload: Array.from(compressed),
-                          },
-                          peerId
-                        );
-
-                        if (!sentOk) {
-                          pendingAcksRef.current.delete(transferId);
-                          if (activeMatch) {
-                            activeMatch.peerRun.pendingOutgoing.delete(transferId);
-                            activeMatch.peerRun.failedCount++;
-                          }
-                        }
-                      } catch {
-                        await sendForPairing(
-                          pairing.id,
-                          {
-                            type: 'note-error',
-                            sessionId: msg.sessionId,
-                            noteId,
-                            reason: 'Compression failed',
-                          },
-                          peerId
-                        );
-                        if (activeMatch) {
-                          activeMatch.peerRun.failedCount++;
-                        }
-                      }
-                    }
-                  } finally {
-                    if (activeMatch) {
-                      activeMatch.peerRun.outboundSendingInProgress = false;
-                      notifyRunCompletion(activeMatch);
-                    }
-                  }
-                  return;
-                }
-
-                // Phase 3: Receive a note payload and acknowledge after validation + DB put
-                if (msg.type === 'note') {
-                  if (!msg.sessionId || !msg.transferId) {
-                    console.warn('Ignoring note without sessionId/transferId from peer:', peerId);
-                    return;
-                  }
-
-                  const transferKey = `${key}\x00${msg.sessionId}\x00${msg.transferId}`;
-                  const cachedAck = processedIncomingTransfersRef.current.get(transferKey);
-                  if (cachedAck) {
-                    await sendForPairing(
-                      pairing.id,
-                      {
-                        type: 'ack',
-                        sessionId: msg.sessionId,
-                        transferId: msg.transferId,
-                        noteId: cachedAck.noteId,
-                        ok: cachedAck.ok,
-                        ...(cachedAck.error !== undefined ? { error: cachedAck.error } : {}),
-                      },
-                      peerId
-                    );
-                    return;
-                  }
-
-                  const activeMatch = findPeerRunForSession(
-                    key,
-                    (p) =>
-                      p.inboundSessionId === msg.sessionId &&
-                      !p.disconnected &&
-                      !p.done &&
-                      p.inboundManifestReceived &&
-                      p.allowedIncomingIds !== null
-                  );
-                  const isValidActiveMatch =
-                    activeMatch !== null &&
-                    (activeMatch.kind === 'manual' ||
-                      (autoSyncEnabledRef.current &&
-                        peerAutoSyncRef.current.get(key) === true));
-
-                  const responderKey = `${key}\x00${msg.sessionId}`;
-                  let inboundResponder: InboundResponderSession | null = null;
-                  if (!isValidActiveMatch) {
-                    const candidate = inboundRespondersRef.current.get(responderKey);
-                    if (candidate) {
-                      const now = Date.now();
-                      if (candidate.expiresAt < now) {
-                        if (candidate.timeoutId !== null) {
-                          clearTimeout(candidate.timeoutId);
-                        }
-                        inboundRespondersRef.current.delete(responderKey);
-                      } else if (
-                        candidate.pairingId === pairing.id &&
-                        candidate.peerId === peerId &&
-                        (!candidate.isAutoSync ||
-                          (autoSyncEnabledRef.current &&
-                            peerAutoSyncRef.current.get(key) === true))
-                      ) {
-                        inboundResponder = candidate;
-                      }
-                    }
-                  }
-
-                  if (!isValidActiveMatch && !inboundResponder) {
-                    console.warn(
-                      'Rejecting unauthorized or inactive incoming note session from peer:',
-                      peerId,
-                      msg.sessionId
-                    );
-                    return;
-                  }
-
-                  const authorizedMatch = isValidActiveMatch ? activeMatch : null;
-                  const allowedIds = authorizedMatch
-                    ? authorizedMatch.peerRun.allowedIncomingIds!
-                    : inboundResponder!.allowedNoteIds;
-                  const pendingIds = authorizedMatch
-                    ? authorizedMatch.peerRun.pendingIncomingIds
-                    : inboundResponder!.pendingNoteIds;
-
-                  const isSessionStillAuthorized = (targetNoteId: string): boolean => {
-                    if (
-                      isUnmountedRef.current ||
-                      roomsRef.current.get(pairing.id) !== entry ||
-                      !desiredRoomsRef.current.has(pairing.id)
-                    ) {
-                      return false;
-                    }
-                    if (authorizedMatch) {
-                      if (authorizedMatch.kind === 'manual') {
-                        return (
-                          activeRunRef.current === authorizedMatch.run &&
-                          !authorizedMatch.run.settled &&
-                          !authorizedMatch.peerRun.disconnected &&
-                          !authorizedMatch.peerRun.done &&
-                          authorizedMatch.peerRun.inboundSessionId === msg.sessionId &&
-                          authorizedMatch.peerRun.allowedIncomingIds?.has(targetNoteId) === true &&
-                          authorizedMatch.peerRun.pendingIncomingIds.has(targetNoteId)
-                        );
-                      }
-                      return (
-                        autoRunsRef.current.get(key) === authorizedMatch.autoRun &&
-                        !authorizedMatch.autoRun.settled &&
-                        !authorizedMatch.peerRun.disconnected &&
-                        !authorizedMatch.peerRun.done &&
-                        autoSyncEnabledRef.current &&
-                        peerAutoSyncRef.current.get(key) === true &&
-                        authorizedMatch.peerRun.inboundSessionId === msg.sessionId &&
-                        authorizedMatch.peerRun.allowedIncomingIds?.has(targetNoteId) === true &&
-                        authorizedMatch.peerRun.pendingIncomingIds.has(targetNoteId)
-                      );
-                    }
-                    const currentResponder = inboundRespondersRef.current.get(responderKey);
-                    return (
-                      currentResponder === inboundResponder &&
-                      currentResponder.pairingId === pairing.id &&
-                      currentResponder.peerId === peerId &&
-                      currentResponder.expiresAt >= Date.now() &&
-                      (!currentResponder.isAutoSync ||
-                        (autoSyncEnabledRef.current &&
-                          peerAutoSyncRef.current.get(key) === true)) &&
-                      currentResponder.allowedNoteIds.has(targetNoteId) &&
-                      currentResponder.pendingNoteIds.has(targetNoteId)
-                    );
-                  };
-
-                  try {
-                    if (
-                      msg.noteId !== undefined &&
-                      (!allowedIds.has(msg.noteId) || !pendingIds.has(msg.noteId))
-                    ) {
-                      throw new Error('Unexpected note ID not requested in this session');
-                    }
-
-                    const note = await decompressNote(msg.payload);
-                    if (msg.noteId !== undefined && msg.noteId !== note.id) {
-                      throw new Error('Note ID mismatch');
-                    }
-
-                    // Enforce session allowlist and pending state before any DB read/write.
-                    if (!allowedIds.has(note.id) || !pendingIds.has(note.id)) {
-                      throw new Error('Unexpected note ID not requested in this session');
-                    }
-
-                    if (!isSessionStillAuthorized(note.id)) {
-                      console.warn(
-                        'Aborting incoming note write after session became inactive:',
-                        peerId,
-                        msg.sessionId
-                      );
-                      return;
-                    }
-
-                    const hash = await computeContentHash(note.content, note.attachments);
-                    if (!isSessionStillAuthorized(note.id)) {
-                      console.warn(
-                        'Aborting incoming note write after session became inactive:',
-                        peerId,
-                        msg.sessionId
-                      );
-                      return;
-                    }
-                    const persistence = await persistIncomingNote(
-                      { ...note, contentHash: hash },
-                      authorizedMatch?.kind === 'manual' &&
-                        authorizedMatch.peerRun.mode === 'manual-selected',
-                      () => isSessionStillAuthorized(note.id)
-                    );
-                    if (persistence === 'inactive') return;
-                    if (persistence === 'blocked') {
-                      throw new Error('Incoming note is blocked by a deletion tombstone');
-                    }
-                    if (persistence === 'stored') {
-                      if (authorizedMatch) {
-                        authorizedMatch.peerRun.syncedIncomingEntries.set(note.id, {
-                          noteId: note.id,
-                          contentHash: hash,
-                          updatedAt: note.updatedAt,
-                          title: note.title,
-                        });
-                      }
-                      onNotesChangedRef.current();
-                    }
-
-                    processedIncomingTransfersRef.current.set(transferKey, {
-                      ok: true,
-                      noteId: note.id,
-                      createdAt: Date.now(),
-                    });
-
-                    await sendForPairing(
-                      pairing.id,
-                      {
-                        type: 'ack',
-                        sessionId: msg.sessionId,
-                        transferId: msg.transferId,
-                        noteId: note.id,
-                        ok: true,
-                      },
-                      peerId
-                    );
-
-                    if (authorizedMatch) {
-                      if (authorizedMatch.peerRun.pendingIncomingIds.has(note.id)) {
-                        authorizedMatch.peerRun.pendingIncomingIds.delete(note.id);
-                        authorizedMatch.peerRun.receivedCount++;
-                        notifyRunCompletion(authorizedMatch);
-                      }
-                    } else if (inboundResponder) {
-                      inboundResponder.pendingNoteIds.delete(note.id);
-                      if (inboundResponder.pendingNoteIds.size === 0) {
-                        if (inboundResponder.timeoutId !== null) {
-                          clearTimeout(inboundResponder.timeoutId);
-                        }
-                        if (inboundRespondersRef.current.get(responderKey) === inboundResponder) {
-                          inboundRespondersRef.current.delete(responderKey);
-                        }
-                      }
-                    }
-                  } catch (err) {
-                    console.warn('Failed to process incoming note payload:', err);
-                    const reportedNoteId = msg.noteId ?? 'unknown';
-                    const errText = 'Validation or persistence failed';
-
-                    processedIncomingTransfersRef.current.set(transferKey, {
-                      ok: false,
-                      noteId: reportedNoteId,
-                      error: errText,
-                      createdAt: Date.now(),
-                    });
-
-                    await sendForPairing(
-                      pairing.id,
-                      {
-                        type: 'ack',
-                        sessionId: msg.sessionId,
-                        transferId: msg.transferId,
-                        noteId: reportedNoteId,
-                        ok: false,
-                        error: errText,
-                      },
-                      peerId
-                    );
-
-                    if (
-                      authorizedMatch &&
-                      msg.noteId &&
-                      authorizedMatch.peerRun.pendingIncomingIds.has(msg.noteId)
-                    ) {
-                      authorizedMatch.peerRun.pendingIncomingIds.delete(msg.noteId);
-                      authorizedMatch.peerRun.failedCount++;
-                      notifyRunCompletion(authorizedMatch);
-                    } else if (
-                      inboundResponder &&
-                      msg.noteId &&
-                      inboundResponder.pendingNoteIds.has(msg.noteId)
-                    ) {
-                      inboundResponder.pendingNoteIds.delete(msg.noteId);
-                      if (inboundResponder.pendingNoteIds.size === 0) {
-                        if (inboundResponder.timeoutId !== null) {
-                          clearTimeout(inboundResponder.timeoutId);
-                        }
-                        if (inboundRespondersRef.current.get(responderKey) === inboundResponder) {
-                          inboundRespondersRef.current.delete(responderKey);
-                        }
-                      }
-                    }
-                  }
-                  return;
-                }
-
-                // Phase 4: Receive transfer acknowledgement from receiver
-                if (msg.type === 'ack') {
-                  const pending = pendingAcksRef.current.get(msg.transferId);
-                  if (
-                    !pending ||
-                    pending.sessionId !== msg.sessionId ||
-                    pending.pairingId !== pairing.id ||
-                    pending.peerId !== peerId ||
-                    pending.noteId !== msg.noteId
-                  ) {
-                    return;
-                  }
-                  pendingAcksRef.current.delete(msg.transferId);
-
-                  if (pending.runType === 'manual') {
-                    const currentRun = activeRunRef.current;
-                    if (!currentRun || currentRun.settled || currentRun.runId !== pending.runId) {
-                      return;
-                    }
-                    const peerRun = currentRun.peers.get(key);
-                    if (!peerRun || !peerRun.pendingOutgoing.has(msg.transferId)) {
-                      return;
-                    }
-                    peerRun.pendingOutgoing.delete(msg.transferId);
-                    if (msg.ok) peerRun.sentCount++;
-                    else peerRun.failedCount++;
-                    evaluateManualRunCompletion(currentRun);
-                  } else if (pending.runType === 'auto') {
-                    const autoRun = autoRunsRef.current.get(key);
-                    if (!autoRun || autoRun.settled || autoRun.runId !== pending.runId) {
-                      return;
-                    }
-                    if (!autoRun.peer.pendingOutgoing.has(msg.transferId)) {
-                      return;
-                    }
-                    autoRun.peer.pendingOutgoing.delete(msg.transferId);
-                    if (msg.ok) autoRun.peer.sentCount++;
-                    else autoRun.peer.failedCount++;
-                    evaluateAutoRunCompletion(autoRun);
-                  }
-                  return;
-                }
-
-                // Sender-reported error for a requested note
-                if (msg.type === 'note-error') {
-                  const errorKey = `${key}\x00${msg.sessionId}\x00${msg.noteId}`;
-                  if (handledNoteErrorsRef.current.has(errorKey)) return;
-                  handledNoteErrorsRef.current.set(errorKey, Date.now());
-
-                  const activeMatch = findPeerRunForSession(
-                    key,
-                    (p) => p.inboundSessionId === msg.sessionId
-                  );
-                  if (activeMatch && activeMatch.peerRun.pendingIncomingIds.has(msg.noteId)) {
-                    activeMatch.peerRun.pendingIncomingIds.delete(msg.noteId);
-                    activeMatch.peerRun.failedCount++;
-                    notifyRunCompletion(activeMatch);
-                    return;
-                  }
-
-                  const responderKey = `${key}\x00${msg.sessionId}`;
-                  const inboundResponder = inboundRespondersRef.current.get(responderKey);
-                  if (inboundResponder && inboundResponder.pendingNoteIds.has(msg.noteId)) {
-                    inboundResponder.pendingNoteIds.delete(msg.noteId);
-                    if (inboundResponder.pendingNoteIds.size === 0) {
-                      if (inboundResponder.timeoutId !== null) {
-                        clearTimeout(inboundResponder.timeoutId);
-                      }
-                      inboundRespondersRef.current.delete(responderKey);
-                    }
-                  }
-                }
-              } catch (e) {
-                console.warn('Failed to handle incoming sync message:', e);
-              }
-            })();
-          };
-        } catch (e) {
-          console.warn('Failed to join Trystero room', pairing.id, e);
-        } finally {
-          if (joinPromise && pendingJoinsRef.current.get(pairing.id) === joinPromise) {
-            pendingJoinsRef.current.delete(pairing.id);
+            setConnectedPeers(next);
           }
-        }
-      })();
+          // Announce local auto-sync preference on peer join / reconnection
+          void sendForPairing(
+            pairingId,
+            { type: 'auto-sync-pref', enabled: autoSyncEnabledRef.current },
+            peerId
+          );
+        },
+        onPeerLeave: (pairingId, entry, peerId) => {
+          if (roomsRef.current.get(pairingId) !== entry) return;
+          const next = connectedPeersRef.current.filter(
+            (p) => !(p.pairingId === pairingId && p.peerId === peerId)
+          );
+          connectedPeersRef.current = next;
+          if (!isUnmountedRef.current) {
+            setConnectedPeers(next);
+          }
+          handlePeerDisconnected(pairingId, peerId);
+        },
+        onSyncMessage: (pairingId, entry, data, peerId) => {
+          const isRoomStillActive = () =>
+            !isUnmountedRef.current &&
+            roomsRef.current.get(pairingId) === entry &&
+            desiredRoomsRef.current.has(pairingId);
 
-      pendingJoinsRef.current.set(pairing.id, joinPromise);
-      return joinPromise;
-    },
+          if (!isRoomStillActive()) return;
+
+          void handleIncomingSyncMessage(data, {
+            pairingId,
+            peerId,
+            isRoomStillActive,
+            isUnmounted: () => isUnmountedRef.current,
+            getConnectedPeers: () => connectedPeersRef.current,
+            getAutoSyncEnabled: () => autoSyncEnabledRef.current,
+            peerAutoSyncMap: peerAutoSyncRef.current,
+            syncPeerAutoSyncState: () => {
+              if (!isUnmountedRef.current) {
+                setPeerAutoSync(buildPeerAutoSyncRecord(peerAutoSyncRef.current));
+              }
+            },
+            getActiveRun: () => activeRunRef.current,
+            autoRuns: autoRunsRef.current,
+            getPendingPreview: () => pendingPreviewRef.current,
+            clearPreviewRequest,
+            setManualPreview,
+            processedManifestSessions: processedManifestSessionsRef.current,
+            outboundResponders: outboundRespondersRef.current,
+            inboundResponders: inboundRespondersRef.current,
+            pendingAcks: pendingAcksRef.current,
+            pendingDeletionAcks: pendingDeletionAcksRef.current,
+            processedIncomingTransfers: processedIncomingTransfersRef.current,
+            handledNoteErrors: handledNoteErrorsRef.current,
+            pruneStaleBookkeeping,
+            sendForPairing,
+            cancelAutoSyncForPeer,
+            startAutoSyncForPeer,
+            evaluateManualRunCompletion,
+            evaluateAutoRunCompletion,
+            notifyRunCompletion,
+            onNotesChanged: () => onNotesChangedRef.current(),
+          });
+        },
+      }),
     [
       cancelAutoSyncForPeer,
       clearPreviewRequest,
       evaluateAutoRunCompletion,
       evaluateManualRunCompletion,
-      findPeerRunForSession,
       handlePeerDisconnected,
       notifyRunCompletion,
       pruneStaleBookkeeping,
@@ -1859,14 +755,7 @@ export function useSync(onNotesChanged: () => void) {
 
   const leaveRoom = useCallback(
     (pairingId: string) => {
-      desiredRoomsRef.current.delete(pairingId);
-      const entry = roomsRef.current.get(pairingId);
-      if (entry) {
-        roomsRef.current.delete(pairingId);
-        try {
-          void Promise.resolve(entry.room.leave?.()).catch(() => {});
-        } catch {}
-      }
+      leavePairingRoom(pairingId, roomsRef.current, desiredRoomsRef.current);
       const next = connectedPeersRef.current.filter((p) => p.pairingId !== pairingId);
       connectedPeersRef.current = next;
       if (!isUnmountedRef.current) {
@@ -1877,7 +766,6 @@ export function useSync(onNotesChanged: () => void) {
     [handlePeerDisconnected]
   );
 
-  // On mount: load auto-sync preference + pairings and join all rooms
   useEffect(() => {
     isUnmountedRef.current = false;
     const roomsMap = roomsRef.current;
@@ -1918,53 +806,28 @@ export function useSync(onNotesChanged: () => void) {
       isUnmountedRef.current = true;
       clearIdleTimer();
       clearPreviewRequest();
-      if (activeRunRef.current?.timeoutId !== null && activeRunRef.current?.timeoutId !== undefined) {
+      if (
+        activeRunRef.current?.timeoutId !== null &&
+        activeRunRef.current?.timeoutId !== undefined
+      ) {
         clearTimeout(activeRunRef.current.timeoutId);
         activeRunRef.current.timeoutId = null;
       }
       activeRunRef.current = null;
-      for (const timer of autoDebounceMap.values()) {
-        clearTimeout(timer);
-      }
-      autoDebounceMap.clear();
-      for (const autoRun of autoRunsMap.values()) {
-        if (autoRun.timeoutId !== null) {
-          clearTimeout(autoRun.timeoutId);
-          autoRun.timeoutId = null;
-        }
-      }
-      autoRunsMap.clear();
-      startingAutoSet.clear();
-      autoPendingSet.clear();
-      lastAutoDigestMap.clear();
-      for (const session of inboundRespondersMap.values()) {
-        if (session.timeoutId !== null) {
-          clearTimeout(session.timeoutId);
-        }
-      }
-      inboundRespondersMap.clear();
-      outboundRespondersMap.clear();
-      pendingAcksMap.clear();
-      for (const pending of pendingDeletionAcksMap.values()) {
-        clearTimeout(pending.timeoutId);
-        void updateTombstoneDelivery(
-          pending.tombstone,
-          { pairingId: pending.pairingId, peerId: pending.peerId },
-          'failed'
-        ).catch((err) => {
-          console.warn('Failed to record deletion delivery failure:', err);
-        });
-      }
-      pendingDeletionAcksMap.clear();
-      desiredSet.clear();
-      pendingMap.clear();
-      const entries = Array.from(roomsMap.values());
-      roomsMap.clear();
-      for (const entry of entries) {
-        try {
-          void Promise.resolve(entry.room.leave?.()).catch(() => {});
-        } catch {}
-      }
+      cleanupAllSyncResources({
+        rooms: roomsMap,
+        pendingJoins: pendingMap,
+        desiredRooms: desiredSet,
+        autoDebounceTimers: autoDebounceMap,
+        autoRuns: autoRunsMap,
+        startingAutoRuns: startingAutoSet,
+        autoPendingResync: autoPendingSet,
+        lastAutoSyncedDigest: lastAutoDigestMap,
+        inboundResponders: inboundRespondersMap,
+        outboundResponders: outboundRespondersMap,
+        pendingAcks: pendingAcksMap,
+        pendingDeletionAcks: pendingDeletionAcksMap,
+      });
       connectedPeersRef.current = [];
     };
   }, [clearIdleTimer, clearPreviewRequest, joinRoom]);
@@ -2081,7 +944,8 @@ export function useSync(onNotesChanged: () => void) {
         setManualPreview({
           stage: 'disconnected',
           pairingId,
-          message: 'No live connection to this device. Ensure both devices are online with Notebook open.',
+          message:
+            'No live connection to this device. Ensure both devices are online with Notebook open.',
         });
         return;
       }
@@ -2165,29 +1029,19 @@ export function useSync(onNotesChanged: () => void) {
 
         for (const peer of targetPeers) {
           const key = peerCompositeKey(peer.pairingId, peer.peerId);
-          peersMap.set(key, {
+          peersMap.set(
             key,
-            pairingId: peer.pairingId,
-            peerId: peer.peerId,
-            mode: 'manual-all',
-            outboundSessionId: crypto.randomUUID(),
-            inboundSessionId: null,
-            localManifest,
-            allowedOutboundIds,
-            allowedIncomingIds: null,
-            outboundRequestReceived: false,
-            outboundSendingInProgress: false,
-            inboundManifestReceived: false,
-            pendingOutgoing: new Map(),
-            pendingIncomingIds: new Set(),
-            syncedIncomingEntries: new Map(),
-            sentCount: 0,
-            receivedCount: 0,
-            failedCount: 0,
-            unchangedCount: 0,
-            disconnected: false,
-            done: false,
-          });
+            createPeerRunState({
+              key,
+              pairingId: peer.pairingId,
+              peerId: peer.peerId,
+              mode: 'manual-all',
+              outboundSessionId: crypto.randomUUID(),
+              inboundSessionId: null,
+              localManifest,
+              allowedOutboundIds,
+            })
+          );
         }
 
         const run: ActiveSyncRun = {
@@ -2250,7 +1104,11 @@ export function useSync(onNotesChanged: () => void) {
     async (
       pairingId: string,
       selectedNoteIds: string[],
-      previewOverride?: { peerId: string; peerManifestSessionId: string; peerManifest: ManifestEntry[] }
+      previewOverride?: {
+        peerId: string;
+        peerManifestSessionId: string;
+        peerManifest: ManifestEntry[];
+      }
     ) => {
       if (activeRunRef.current && !activeRunRef.current.settled) {
         return;
@@ -2307,7 +1165,6 @@ export function useSync(onNotesChanged: () => void) {
         new Set(computeDiff(localManifest, selectedPeerEntries))
       );
 
-      // Count selected notes that are already identical locally
       const selectedLocalEntries = localManifest.filter((e) => selectedSet.has(e.noteId));
       const unchangedSelected = countUnchangedNotes(
         selectedLocalEntries,
@@ -2327,7 +1184,7 @@ export function useSync(onNotesChanged: () => void) {
 
       const key = peerCompositeKey(pairingId, preview.peerId);
       const runId = crypto.randomUUID();
-      const peerRun: PeerRunState = {
+      const peerRun = createPeerRunState({
         key,
         pairingId,
         peerId: preview.peerId,
@@ -2338,18 +1195,10 @@ export function useSync(onNotesChanged: () => void) {
         allowedOutboundIds: new Set(),
         allowedIncomingIds: new Set(toRequest),
         outboundRequestReceived: true,
-        outboundSendingInProgress: false,
         inboundManifestReceived: true,
-        pendingOutgoing: new Map(),
         pendingIncomingIds: new Set(toRequest),
-        syncedIncomingEntries: new Map(),
-        sentCount: 0,
-        receivedCount: 0,
-        failedCount: 0,
         unchangedCount: unchangedSelected,
-        disconnected: false,
-        done: false,
-      };
+      });
 
       const run: ActiveSyncRun = {
         runId,
@@ -2406,7 +1255,6 @@ export function useSync(onNotesChanged: () => void) {
     clearIdleTimer();
     let activePeers = connectedPeersRef.current;
 
-    // If no active connections, attempt auto-reconnect and wait up to 5s
     if (activePeers.length === 0) {
       setSyncStatus({ stage: 'connecting' });
       const currentPairings = await db.pairings.toArray();
@@ -2420,14 +1268,10 @@ export function useSync(onNotesChanged: () => void) {
         })
       );
 
-      const start = Date.now();
-      while (Date.now() - start < CONNECT_WAIT_TIMEOUT_MS) {
-        if (isUnmountedRef.current) return;
-        activePeers = connectedPeersRef.current;
-        if (activePeers.length > 0) break;
-        await new Promise((res) => setTimeout(res, CONNECT_POLL_INTERVAL_MS));
-      }
-      activePeers = connectedPeersRef.current;
+      activePeers = await waitForConnectedPeers(
+        () => connectedPeersRef.current,
+        () => isUnmountedRef.current
+      );
     }
 
     if (isUnmountedRef.current) return;
