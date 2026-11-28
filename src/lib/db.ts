@@ -1,26 +1,18 @@
 import Dexie, { type Table } from 'dexie';
+import type { AttachmentEntry, Module, Notebook } from '@/types/workspace';
+import {
+  DEFAULT_MODULE_ID,
+  DEFAULT_MODULE_NAME,
+  DEFAULT_MODULE_SLUG,
+} from '@/types/workspace';
 
-export interface Note {
-  id: string;
-  title: string;
-  content: string;
-  /** attachment id → base64 data URL */
-  attachments: Record<string, AttachmentEntry>;
-  createdAt: string;
-  updatedAt: string;
-  /** SHA-256 hex of content + serialized attachments */
-  contentHash: string;
-}
-
-export interface AttachmentEntry {
-  name: string;
-  data: string; // base64 data URL
-  createdAt: string;
-}
+export type { AttachmentEntry, Module, Notebook };
+export type Note = Notebook;
+export { DEFAULT_MODULE_ID, DEFAULT_MODULE_NAME, DEFAULT_MODULE_SLUG };
 
 export interface Pairing {
-  id: string;       // persistent Trystero room code (12-char alphanumeric)
-  label: string;    // user-given name e.g. "My Phone"
+  id: string; // persistent Trystero room code (12-char alphanumeric)
+  label: string; // user-given name e.g. "My Phone"
   pairedAt: string; // ISO timestamp
 }
 
@@ -51,7 +43,8 @@ export interface DeletionDelivery {
 }
 
 export class NotebookDB extends Dexie {
-  notes!: Table<Note, string>;
+  notes!: Table<Notebook, string>;
+  modules!: Table<Module, string>;
   pairings!: Table<Pairing, string>;
   tombstones!: Table<Tombstone, string>;
   deletionDeliveries!: Table<DeletionDelivery, string>;
@@ -92,6 +85,55 @@ export class NotebookDB extends Dexie {
             }
           });
       });
+    this.version(4)
+      .stores({
+        notes: 'id, updatedAt, title, moduleId',
+        modules: 'id, name, slug, order, updatedAt, isArchived',
+        pairings: 'id, label, pairedAt',
+        tombstones: 'noteId, &deletionId, deletedAt, scope',
+        deletionDeliveries: 'id, deletionId, noteId, [pairingId+peerId], status',
+      })
+      .upgrade(async (tx) => {
+        const now = new Date().toISOString();
+        const modulesTable = tx.table('modules');
+        const notesTable = tx.table('notes');
+
+        // Ensure default module exists
+        const existingDefault = await modulesTable.get(DEFAULT_MODULE_ID);
+        if (!existingDefault) {
+          await modulesTable.put({
+            id: DEFAULT_MODULE_ID,
+            name: DEFAULT_MODULE_NAME,
+            slug: DEFAULT_MODULE_SLUG,
+            description: 'Default workspace module',
+            order: 0,
+            isArchived: false,
+            createdAt: now,
+            updatedAt: now,
+          });
+        }
+
+        // Safe migration: preserve all existing notes and assign notes without moduleId to DEFAULT_MODULE_ID
+        await notesTable
+          .toCollection()
+          .modify((note: Partial<Notebook>) => {
+            if (typeof note.moduleId !== 'string' || note.moduleId.trim() === '') {
+              note.moduleId = DEFAULT_MODULE_ID;
+            }
+            if (typeof note.isArchived !== 'boolean') {
+              note.isArchived = false;
+            }
+            if (typeof note.isPinned !== 'boolean') {
+              note.isPinned = false;
+            }
+            if (
+              note.order !== undefined &&
+              (typeof note.order !== 'number' || !Number.isFinite(note.order))
+            ) {
+              delete note.order;
+            }
+          });
+      });
   }
 }
 
@@ -123,7 +165,7 @@ Happy note-taking!`;
     const attachments: Record<string, AttachmentEntry> = {};
     const contentHash = await computeContentHash(content, attachments);
 
-    const welcomeNote: Note = {
+    const welcomeNote: Notebook = {
       id: 'welcome-note-default-id',
       title: 'Welcome to Notebook',
       content,
@@ -131,9 +173,27 @@ Happy note-taking!`;
       createdAt: now,
       updatedAt: now,
       contentHash,
+      moduleId: DEFAULT_MODULE_ID,
+      isArchived: false,
+      isPinned: false,
     };
 
-    await db.transaction('rw', db.notes, db.tombstones, async () => {
+    await db.transaction('rw', db.notes, db.modules, db.tombstones, async () => {
+      // Ensure default module exists
+      const existingDefault = await db.modules.get(DEFAULT_MODULE_ID);
+      if (!existingDefault) {
+        await db.modules.put({
+          id: DEFAULT_MODULE_ID,
+          name: DEFAULT_MODULE_NAME,
+          slug: DEFAULT_MODULE_SLUG,
+          description: 'Default workspace module',
+          order: 0,
+          isArchived: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+
       if (
         (await db.notes.count()) === 0 &&
         !(await db.tombstones.get(welcomeNote.id))

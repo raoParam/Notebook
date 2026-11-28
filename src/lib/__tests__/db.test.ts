@@ -6,7 +6,7 @@ import {
   updateNoteSafely,
   updateTombstoneDelivery,
 } from '@/lib/tombstones';
-import { db, NotebookDB, seedIfEmpty } from '@/lib/db';
+import { db, DEFAULT_MODULE_ID, DEFAULT_MODULE_NAME, NotebookDB, seedIfEmpty } from '@/lib/db';
 
 describe('NotebookDB schema migration', () => {
   afterEach(async () => {
@@ -33,8 +33,14 @@ describe('NotebookDB schema migration', () => {
 
     const upgraded = new NotebookDB();
     await upgraded.open();
-    expect(upgraded.verno).toBe(3);
-    expect((await upgraded.notes.get('legacy-note'))?.content).toBe('Keep me');
+    expect(upgraded.verno).toBe(4);
+    const legacyNote = await upgraded.notes.get('legacy-note');
+    expect(legacyNote?.content).toBe('Keep me');
+    expect(legacyNote?.moduleId).toBe(DEFAULT_MODULE_ID);
+    expect(legacyNote?.isArchived).toBe(false);
+    expect(legacyNote?.isPinned).toBe(false);
+    expect(await upgraded.modules.count()).toBe(1);
+    expect((await upgraded.modules.get(DEFAULT_MODULE_ID))?.name).toBe(DEFAULT_MODULE_NAME);
     expect(await upgraded.tombstones.count()).toBe(0);
     expect(upgraded.tombstones.schema.primKey.name).toBe('noteId');
     expect(upgraded.tombstones.schema.indexes.map((index) => index.name)).toEqual([
@@ -92,8 +98,11 @@ describe('NotebookDB schema migration', () => {
 
     const upgraded = new NotebookDB();
     await upgraded.open();
-    expect(upgraded.verno).toBe(3);
-    expect((await upgraded.notes.get('v2-note'))?.content).toBe('Still here');
+    expect(upgraded.verno).toBe(4);
+    const v2Note = await upgraded.notes.get('v2-note');
+    expect(v2Note?.content).toBe('Still here');
+    expect(v2Note?.moduleId).toBe(DEFAULT_MODULE_ID);
+    expect(await upgraded.modules.get(DEFAULT_MODULE_ID)).toBeDefined();
     expect(await upgraded.tombstones.get('v2-deleted-valid')).toEqual({
       noteId: 'v2-deleted-valid',
       deletedAt: '2026-01-03T00:00:00.000Z',
@@ -110,6 +119,54 @@ describe('NotebookDB schema migration', () => {
     });
     expect(await upgraded.deletionDeliveries.count()).toBe(0);
     upgraded.close();
+  });
+
+  it('upgrades a v3 database to v4 and assigns existing unassigned notes to the default module', async () => {
+    const v3 = new Dexie('NotebookDB');
+    v3.version(1).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+    });
+    v3.version(2).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+      tombstones: 'noteId, &deletionId, deletedAt, scope',
+    });
+    v3.version(3).stores({
+      notes: 'id, updatedAt, title',
+      pairings: 'id, label, pairedAt',
+      tombstones: 'noteId, &deletionId, deletedAt, scope',
+      deletionDeliveries: 'id, deletionId, noteId, [pairingId+peerId], status',
+    });
+    await v3.open();
+    await v3.table('notes').put({
+      id: 'v3-orphan-note',
+      title: 'Unassigned Note',
+      content: 'Needs module assignment',
+      attachments: {},
+      createdAt: '2026-02-01T00:00:00.000Z',
+      updatedAt: '2026-02-02T00:00:00.000Z',
+      contentHash: 'v3-hash',
+    });
+    v3.close();
+
+    const v4 = new NotebookDB();
+    await v4.open();
+    expect(v4.verno).toBe(4);
+
+    const migratedNote = await v4.notes.get('v3-orphan-note');
+    expect(migratedNote).toBeDefined();
+    expect(migratedNote?.title).toBe('Unassigned Note');
+    expect(migratedNote?.content).toBe('Needs module assignment');
+    expect(migratedNote?.moduleId).toBe(DEFAULT_MODULE_ID);
+    expect(migratedNote?.isArchived).toBe(false);
+    expect(migratedNote?.isPinned).toBe(false);
+
+    const defaultModule = await v4.modules.get(DEFAULT_MODULE_ID);
+    expect(defaultModule).toBeDefined();
+    expect(defaultModule?.name).toBe(DEFAULT_MODULE_NAME);
+
+    v4.close();
   });
 
   it('persists atomic local deletion tombstones and per-peer deliveries across database reopen', async () => {

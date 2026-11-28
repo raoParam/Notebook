@@ -1,140 +1,27 @@
 'use client';
 
 import React, { createContext, useContext, useEffect, useState } from 'react';
+import {
+  BuiltInThemeId,
+  CustomTheme,
+  INK_COLORS,
+  LEGACY_THEME_FALLBACKS,
+  PAPER_COLORS,
+  THEME_COLOR_VARS,
+  THEME_PRESETS,
+  ThemeColors,
+  resolveThemeId,
+} from '@/design-system/theme';
+import { isColorDark, isValidColorValue } from '@/design-system/color-validator';
 
-export type BuiltInThemeId = 'light' | 'dark' | 'ocean' | 'dracula' | 'nord' | 'gruvbox';
-
-export interface ThemeColors {
-  bgApp: string;
-  bgPaper: string;
-  bgSidebar: string;
-  accent: string;
-  accentSoft: string;
-  gold: string;
-  border: string;
-  ink: string;
-  inkSoft: string;
-  inkMuted: string;
-  hover: string;
-  danger: string;
-}
-
-export interface CustomTheme {
-  id: string;
-  name: string;
-  isDark: boolean;
-  colors: ThemeColors;
-}
-
-export const THEME_PRESETS: Record<BuiltInThemeId, { name: string; isDark: boolean; colors: ThemeColors }> = {
-  light: {
-    name: 'Light',
-    isDark: false,
-    colors: {
-      bgApp: '#F5F4F0',
-      bgPaper: '#FFFFFF',
-      bgSidebar: '#EFEDE7',
-      accent: '#16324F',
-      accentSoft: '#3D5A78',
-      gold: '#AD8A4E',
-      border: '#DEDAD0',
-      ink: '#20242A',
-      inkSoft: '#5B6169',
-      inkMuted: '#858177',
-      hover: '#E6E2D9',
-      danger: '#A23B2E',
-    },
-  },
-  dark: {
-    name: 'Dark',
-    isDark: true,
-    colors: {
-      bgApp: '#14171C',
-      bgPaper: '#1B1F26',
-      bgSidebar: '#101317',
-      accent: '#7FA8CC',
-      accentSoft: '#9CC0E0',
-      gold: '#D4AF6A',
-      border: '#2A2F37',
-      ink: '#E7E5DE',
-      inkSoft: '#9BA1AA',
-      inkMuted: '#6E747C',
-      hover: '#22262E',
-      danger: '#E0796A',
-    },
-  },
-  ocean: {
-    name: 'Ocean',
-    isDark: true,
-    colors: {
-      bgApp: '#0F172A',
-      bgPaper: '#1E293B',
-      bgSidebar: '#0B132B',
-      accent: '#38BDF8',
-      accentSoft: '#0EA5E9',
-      gold: '#2DD4BF',
-      border: '#334155',
-      ink: '#F1F5F9',
-      inkSoft: '#94A3B8',
-      inkMuted: '#64748B',
-      hover: '#1E293B',
-      danger: '#F43F5E',
-    },
-  },
-  dracula: {
-    name: 'Dracula',
-    isDark: true,
-    colors: {
-      bgApp: '#282A36',
-      bgPaper: '#343746',
-      bgSidebar: '#21222C',
-      accent: '#BD93F9',
-      accentSoft: '#FF79C6',
-      gold: '#F1FA8C',
-      border: '#44475A',
-      ink: '#F8F8F2',
-      inkSoft: '#6272A4',
-      inkMuted: '#8BE9FD',
-      hover: '#44475A',
-      danger: '#FF5555',
-    },
-  },
-  nord: {
-    name: 'Nord',
-    isDark: true,
-    colors: {
-      bgApp: '#2E3440',
-      bgPaper: '#3B4252',
-      bgSidebar: '#272C36',
-      accent: '#88C0D0',
-      accentSoft: '#81A1C1',
-      gold: '#EBCB8B',
-      border: '#4C566A',
-      ink: '#ECEFF4',
-      inkSoft: '#D8DEE9',
-      inkMuted: '#7B88A1',
-      hover: '#434C5E',
-      danger: '#BF616A',
-    },
-  },
-  gruvbox: {
-    name: 'Gruvbox',
-    isDark: true,
-    colors: {
-      bgApp: '#282828',
-      bgPaper: '#3C3836',
-      bgSidebar: '#1D2021',
-      accent: '#FE8019',
-      accentSoft: '#FABD2F',
-      gold: '#8EC07C',
-      border: '#504945',
-      ink: '#EBDBB2',
-      inkSoft: '#BDAE93',
-      inkMuted: '#928374',
-      hover: '#504945',
-      danger: '#FB4934',
-    },
-  },
+export type { BuiltInThemeId, CustomTheme, ThemeColors };
+export {
+  INK_COLORS,
+  LEGACY_THEME_FALLBACKS,
+  PAPER_COLORS,
+  THEME_COLOR_VARS,
+  THEME_PRESETS,
+  resolveThemeId,
 };
 
 export interface FontSettings {
@@ -149,34 +36,32 @@ export function cleanFont(val?: string): string {
 }
 
 export const DEFAULT_FONTS: FontSettings = {
-  uiFont: "Poppins, sans-serif",
-  serifFont: "Source Serif 4, serif",
-  monoFont: "JetBrains Mono, monospace",
+  uiFont: 'Inter, sans-serif',
+  serifFont: 'Source Serif 4, Georgia, serif',
+  monoFont: 'JetBrains Mono, monospace',
 };
 
 export const FONT_OPTIONS = {
   ui: [
-    { label: 'Poppins (Professional Modern)', value: "Poppins, sans-serif" },
-    { label: 'Plus Jakarta Sans', value: "Plus Jakarta Sans, sans-serif" },
-    { label: 'Inter (Clean Tech)', value: "Inter, sans-serif" },
-    { label: 'Roboto (Classic)', value: "Roboto, sans-serif" },
-    { label: 'Outfit (Sleek Geometric)', value: "Outfit, sans-serif" },
-    { label: 'System UI', value: "system-ui, -apple-system, BlinkMacSystemFont, sans-serif" },
+    { label: 'Inter (Design System Default)', value: 'Inter, sans-serif' },
+    { label: 'Poppins (Modern Clean)', value: 'Poppins, sans-serif' },
+    { label: 'Plus Jakarta Sans', value: 'Plus Jakarta Sans, sans-serif' },
+    { label: 'Roboto (Classic)', value: 'Roboto, sans-serif' },
+    { label: 'Outfit (Geometric)', value: 'Outfit, sans-serif' },
+    { label: 'System UI', value: 'system-ui, -apple-system, BlinkMacSystemFont, sans-serif' },
   ],
   serif: [
-    { label: 'Source Serif 4 (Classic Serif)', value: "Source Serif 4, serif" },
-    { label: 'Lora (Editorial Elegance)', value: "Lora, serif" },
-    { label: 'Poppins (Modern Clean)', value: "Poppins, sans-serif" },
-    { label: 'Merriweather', value: "Merriweather, serif" },
-    { label: 'Playfair Display', value: "Playfair Display, serif" },
-    { label: 'Georgia', value: "Georgia, serif" },
+    { label: 'Source Serif 4 (Design System Serif)', value: 'Source Serif 4, Georgia, serif' },
+    { label: 'Lora (Editorial)', value: 'Lora, serif' },
+    { label: 'Merriweather', value: 'Merriweather, serif' },
+    { label: 'Playfair Display', value: 'Playfair Display, serif' },
+    { label: 'Georgia', value: 'Georgia, serif' },
   ],
   mono: [
-    { label: 'JetBrains Mono (Default Code)', value: "JetBrains Mono, monospace" },
-    { label: 'Fira Code (Developer)', value: "Fira Code, monospace" },
-    { label: 'Space Mono (Modern Tech)', value: "Space Mono, monospace" },
-    { label: 'Courier Prime (Typewriter)', value: "Courier Prime, monospace" },
-    { label: 'Consolas', value: "Consolas, monospace" },
+    { label: 'JetBrains Mono (Design System Mono)', value: 'JetBrains Mono, monospace' },
+    { label: 'Fira Code', value: 'Fira Code, monospace' },
+    { label: 'Space Mono', value: 'Space Mono, monospace' },
+    { label: 'Courier Prime', value: 'Courier Prime, monospace' },
   ],
 };
 
@@ -212,9 +97,9 @@ interface ThemeContextType {
 }
 
 const ThemeContext = createContext<ThemeContextType>({
-  themeId: 'light',
-  activeColors: THEME_PRESETS.light.colors,
-  customColors: THEME_PRESETS.light.colors,
+  themeId: 'paper',
+  activeColors: PAPER_COLORS,
+  customColors: PAPER_COLORS,
   customThemeName: 'My Custom Theme',
   savedCustomThemes: [],
   fonts: DEFAULT_FONTS,
@@ -231,21 +116,33 @@ const ThemeContext = createContext<ThemeContextType>({
   resetFonts: () => {},
 });
 
-function applyColorsToDOM(colors: ThemeColors, isDark: boolean) {
+/**
+ * Applies theme colors to the document root element.
+ * For built-in themes (paper/ink), inline style overrides are removed so tokens.css
+ * remains the centralized single source of truth.
+ * For custom themes, individual CSS variables are set on the document element.
+ */
+function applyColorsToDOM(colors: ThemeColors, isDark: boolean, isBuiltIn: boolean = false) {
   if (typeof document === 'undefined') return;
   const root = document.documentElement;
-  root.style.setProperty('--bg-app', colors.bgApp);
-  root.style.setProperty('--bg-paper', colors.bgPaper);
-  root.style.setProperty('--bg-sidebar', colors.bgSidebar);
-  root.style.setProperty('--accent', colors.accent);
-  root.style.setProperty('--accent-soft', colors.accentSoft);
-  root.style.setProperty('--gold', colors.gold);
-  root.style.setProperty('--border', colors.border);
-  root.style.setProperty('--ink', colors.ink);
-  root.style.setProperty('--ink-soft', colors.inkSoft);
-  root.style.setProperty('--ink-muted', colors.inkMuted);
-  root.style.setProperty('--hover', colors.hover);
-  root.style.setProperty('--danger', colors.danger);
+
+  if (isBuiltIn) {
+    // Clear inline property overrides so tokens.css controls the presentation
+    (Object.values(THEME_COLOR_VARS) as string[]).forEach((cssVar) => {
+      root.style.removeProperty(cssVar);
+    });
+    root.style.removeProperty('--color-action-primary-text');
+  } else {
+    // Apply each custom color to its respective CSS variable
+    (Object.entries(THEME_COLOR_VARS) as [keyof ThemeColors, string][]).forEach(([key, cssVar]) => {
+      const value = colors[key];
+      if (isValidColorValue(value)) {
+        root.style.setProperty(cssVar, value);
+      }
+    });
+    // Set contrast text for primary button
+    root.style.setProperty('--color-action-primary-text', isDark ? '#191B18' : '#FFFFFF');
+  }
 
   root.classList.toggle('dark', isDark);
 }
@@ -274,29 +171,43 @@ function applyFontsToDOM(fonts: FontSettings) {
 }
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [themeId, setThemeId] = useState<string>('light');
+  const [themeId, setThemeId] = useState<string>('paper');
   const [savedCustomThemes, setSavedCustomThemes] = useState<CustomTheme[]>([]);
-  const [customColors, setCustomColors] = useState<ThemeColors>(THEME_PRESETS.light.colors);
+  const [customColors, setCustomColors] = useState<ThemeColors>(PAPER_COLORS);
   const [customThemeName, setCustomThemeName] = useState<string>('My Custom Theme');
   const [fonts, setFonts] = useState<FontSettings>(DEFAULT_FONTS);
 
-  // Helper to find colors and dark status for any given theme ID
-  const getThemeData = (id: string, currentCustomColors: ThemeColors, customList: CustomTheme[]) => {
-    if (id === 'custom-draft') {
-      return { colors: currentCustomColors, isDark: isColorDark(currentCustomColors.bgApp) };
+  /**
+   * Helper to retrieve colors, dark state, and built-in status for any theme ID.
+   * Gracefully resolves legacy IDs (light/dark/ocean/etc.).
+   */
+  const getThemeData = (
+    id: string,
+    currentCustomColors: ThemeColors,
+    customList: CustomTheme[]
+  ): { colors: ThemeColors; isDark: boolean; isBuiltIn: boolean; resolvedId: string } => {
+    const resolved = resolveThemeId(id);
+
+    if (resolved === 'custom-draft') {
+      return {
+        colors: currentCustomColors,
+        isDark: isColorDark(currentCustomColors.bgApp),
+        isBuiltIn: false,
+        resolvedId: 'custom-draft',
+      };
     }
-    const saved = customList.find((t) => t.id === id);
+
+    const saved = customList.find((t) => t.id === resolved);
     if (saved) {
-      return { colors: saved.colors, isDark: saved.isDark };
+      return { colors: saved.colors, isDark: saved.isDark, isBuiltIn: false, resolvedId: saved.id };
     }
-    if (THEME_PRESETS[id as BuiltInThemeId]) {
-      const preset = THEME_PRESETS[id as BuiltInThemeId];
-      return { colors: preset.colors, isDark: preset.isDark };
+
+    if (resolved === 'ink') {
+      return { colors: INK_COLORS, isDark: true, isBuiltIn: true, resolvedId: 'ink' };
     }
-    if (id === 'custom') {
-      return { colors: currentCustomColors, isDark: isColorDark(currentCustomColors.bgApp) };
-    }
-    return { colors: THEME_PRESETS.light.colors, isDark: false };
+
+    // Default to paper
+    return { colors: PAPER_COLORS, isDark: false, isBuiltIn: true, resolvedId: 'paper' };
   };
 
   useEffect(() => {
@@ -305,7 +216,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     queueMicrotask(() => {
       if (cancelled) return;
       try {
-        const savedThemeId = localStorage.getItem('nb-theme-id') || 'light';
+        const rawSavedThemeId = localStorage.getItem('nb-theme-id') || 'paper';
         const savedCustomColors = localStorage.getItem('nb-custom-colors');
         const savedCustomListStr = localStorage.getItem('nb-saved-custom-themes');
         const savedFonts = localStorage.getItem('nb-fonts');
@@ -315,18 +226,43 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
           try {
             const parsedList: unknown = JSON.parse(savedCustomListStr);
             if (Array.isArray(parsedList)) {
-              loadedCustomList = parsedList as CustomTheme[];
+              // Sanitize and validate custom themes
+              loadedCustomList = parsedList
+                .filter((item): item is CustomTheme => {
+                  if (!isPlainRecord(item)) return false;
+                  if (typeof item.id !== 'string' || typeof item.name !== 'string') return false;
+                  if (!isPlainRecord(item.colors)) return false;
+                  return true;
+                })
+                .map((theme) => {
+                  const sanitizedColors: Partial<ThemeColors> = {};
+                  (Object.keys(PAPER_COLORS) as (keyof ThemeColors)[]).forEach((k) => {
+                    const rawVal = theme.colors[k];
+                    sanitizedColors[k] =
+                      isValidColorValue(rawVal) ? (rawVal as string) : PAPER_COLORS[k];
+                  });
+                  return {
+                    ...theme,
+                    colors: sanitizedColors as ThemeColors,
+                  };
+                });
               setSavedCustomThemes(loadedCustomList);
             }
           } catch {}
         }
 
-        let loadedCustomColors = THEME_PRESETS.light.colors;
+        let loadedCustomColors: ThemeColors = PAPER_COLORS;
         if (savedCustomColors) {
           try {
             const parsedColors: unknown = JSON.parse(savedCustomColors);
             if (isPlainRecord(parsedColors)) {
-              loadedCustomColors = { ...THEME_PRESETS.light.colors, ...(parsedColors as Partial<ThemeColors>) };
+              const sanitized: Partial<ThemeColors> = {};
+              (Object.keys(PAPER_COLORS) as (keyof ThemeColors)[]).forEach((k) => {
+                const rawVal = parsedColors[k];
+                sanitized[k] =
+                  isValidColorValue(rawVal) ? (rawVal as string) : PAPER_COLORS[k];
+              });
+              loadedCustomColors = { ...PAPER_COLORS, ...sanitized };
               setCustomColors(loadedCustomColors);
             }
           } catch {}
@@ -347,20 +283,20 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
           } catch {}
         }
 
-        setThemeId(savedThemeId);
+        const activeData = getThemeData(rawSavedThemeId, loadedCustomColors, loadedCustomList);
+        setThemeId(activeData.resolvedId);
 
-        const activeSaved = loadedCustomList.find((t) => t.id === savedThemeId);
+        const activeSaved = loadedCustomList.find((t) => t.id === activeData.resolvedId);
         if (activeSaved) {
           setCustomColors(activeSaved.colors);
           setCustomThemeName(activeSaved.name);
-        } else if (THEME_PRESETS[savedThemeId as BuiltInThemeId]) {
-          const p = THEME_PRESETS[savedThemeId as BuiltInThemeId];
+        } else if (THEME_PRESETS[activeData.resolvedId as BuiltInThemeId]) {
+          const p = THEME_PRESETS[activeData.resolvedId as BuiltInThemeId];
           setCustomColors(p.colors);
           setCustomThemeName(`My ${p.name} Custom`);
         }
 
-        const activeData = getThemeData(savedThemeId, loadedCustomColors, loadedCustomList);
-        applyColorsToDOM(activeData.colors, activeData.isDark);
+        applyColorsToDOM(activeData.colors, activeData.isDark, activeData.isBuiltIn);
         applyFontsToDOM(loadedFonts);
       } catch {}
     });
@@ -374,23 +310,22 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const activeColors = activeData.colors;
 
   const selectTheme = (id: string) => {
-    setThemeId(id);
-    try {
-      localStorage.setItem('nb-theme-id', id);
-    } catch {}
-
     const data = getThemeData(id, customColors, savedCustomThemes);
+    const targetId = data.resolvedId;
+
+    setThemeId(targetId);
+    writeStorage('nb-theme-id', targetId);
 
     setCustomColors(data.colors);
-    const preset = THEME_PRESETS[id as BuiltInThemeId];
+    const preset = THEME_PRESETS[targetId as BuiltInThemeId];
     if (preset) {
       setCustomThemeName(`My ${preset.name} Custom`);
     } else {
-      const saved = savedCustomThemes.find((t) => t.id === id);
+      const saved = savedCustomThemes.find((t) => t.id === targetId);
       if (saved) setCustomThemeName(saved.name);
     }
 
-    applyColorsToDOM(data.colors, data.isDark);
+    applyColorsToDOM(data.colors, data.isDark, data.isBuiltIn);
   };
 
   const startCustomizingTheme = (id?: string) => {
@@ -398,14 +333,16 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const data = getThemeData(targetId, customColors, savedCustomThemes);
     setCustomColors(data.colors);
     setThemeId('custom-draft');
-    try {
-      localStorage.setItem('nb-theme-id', 'custom-draft');
-      localStorage.setItem('nb-custom-colors', JSON.stringify(data.colors));
-    } catch {}
-    applyColorsToDOM(data.colors, data.isDark);
+    writeStorage('nb-theme-id', 'custom-draft');
+    writeStorage('nb-custom-colors', JSON.stringify(data.colors));
+    applyColorsToDOM(data.colors, data.isDark, false);
   };
 
   const updateCustomColor = (key: keyof ThemeColors, value: string) => {
+    if (!isValidColorValue(value)) {
+      return;
+    }
+
     let baseColors = customColors;
     if (themeId !== 'custom-draft' && THEME_PRESETS[themeId as BuiltInThemeId]) {
       baseColors = THEME_PRESETS[themeId as BuiltInThemeId].colors;
@@ -414,14 +351,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       if (saved) baseColors = saved.colors;
     }
 
-    const updated = { ...baseColors, [key]: value };
+    const updated: ThemeColors = { ...baseColors, [key]: value };
     setCustomColors(updated);
     setThemeId('custom-draft');
-    try {
-      localStorage.setItem('nb-theme-id', 'custom-draft');
-      localStorage.setItem('nb-custom-colors', JSON.stringify(updated));
-    } catch {}
-    applyColorsToDOM(updated, isColorDark(updated.bgApp));
+    writeStorage('nb-theme-id', 'custom-draft');
+    writeStorage('nb-custom-colors', JSON.stringify(updated));
+    applyColorsToDOM(updated, isColorDark(updated.bgApp), false);
   };
 
   const saveCustomTheme = (nameInput?: string) => {
@@ -429,7 +364,6 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setCustomThemeName(finalName);
 
     const isDark = isColorDark(customColors.bgApp);
-
     const existingIndex = savedCustomThemes.findIndex((t) => t.id === themeId);
 
     let updatedList: CustomTheme[];
@@ -458,37 +392,31 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setSavedCustomThemes(updatedList);
     setThemeId(newThemeId);
 
-    try {
-      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
-      localStorage.setItem('nb-theme-id', newThemeId);
-      localStorage.setItem('nb-custom-colors', JSON.stringify(customColors));
-    } catch {}
+    writeStorage('nb-saved-custom-themes', JSON.stringify(updatedList));
+    writeStorage('nb-theme-id', newThemeId);
+    writeStorage('nb-custom-colors', JSON.stringify(customColors));
 
-    applyColorsToDOM(customColors, isDark);
+    applyColorsToDOM(customColors, isDark, false);
   };
 
   const deleteCustomTheme = (id: string) => {
     const updatedList = savedCustomThemes.filter((t) => t.id !== id);
     setSavedCustomThemes(updatedList);
-    try {
-      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
-    } catch {}
+    writeStorage('nb-saved-custom-themes', JSON.stringify(updatedList));
 
     if (themeId === id) {
-      selectTheme('light');
+      selectTheme('paper');
     }
   };
 
   const resetCustomTheme = () => {
-    const resetVal = THEME_PRESETS.light.colors;
+    const resetVal = PAPER_COLORS;
     setCustomColors(resetVal);
     setCustomThemeName('My Custom Theme');
-    setThemeId('light');
-    try {
-      localStorage.setItem('nb-theme-id', 'light');
-      localStorage.setItem('nb-custom-colors', JSON.stringify(resetVal));
-    } catch {}
-    applyColorsToDOM(resetVal, false);
+    setThemeId('paper');
+    writeStorage('nb-theme-id', 'paper');
+    writeStorage('nb-custom-colors', JSON.stringify(resetVal));
+    applyColorsToDOM(resetVal, false, true);
   };
 
   const importThemeFromJSON = (jsonString: string): ImportResult => {
@@ -536,14 +464,24 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const hover = getVal('hover', 'hover_bg');
     const danger = getVal('danger', 'error');
 
+    // Strict validation of required color properties
     if (!bgApp || !accent || !ink) {
       return {
         success: false,
-        error: 'The theme file is missing essential color definitions (App Background, Accent, or Text color). Please select a complete theme file.',
+        error: 'The theme file is missing essential color definitions (App Background, Accent, or Text color).',
       };
     }
 
-    const defaultBase = isColorDark(bgApp) ? THEME_PRESETS.dark.colors : THEME_PRESETS.light.colors;
+    const rawValues = [bgApp, bgPaper, bgSidebar, accent, accentSoft, gold, border, ink, inkSoft, inkMuted, hover, danger].filter(Boolean);
+    const hasInvalidColor = rawValues.some((val) => !isValidColorValue(val));
+    if (hasInvalidColor) {
+      return {
+        success: false,
+        error: 'The theme file contains invalid or unsafe color values. Please check format (e.g. #RRGGBB).',
+      };
+    }
+
+    const defaultBase = isColorDark(bgApp) ? INK_COLORS : PAPER_COLORS;
 
     const colors: ThemeColors = {
       bgApp,
@@ -560,7 +498,9 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       danger: danger || defaultBase.danger,
     };
 
-    const themeName = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'Imported Custom Theme';
+    const rawName = typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name.trim() : 'Imported Custom Theme';
+    // Sanitize theme name
+    const themeName = rawName.slice(0, 40).replace(/[<>]/g, '');
     const isDark = typeof parsed.isDark === 'boolean' ? parsed.isDark : isColorDark(colors.bgApp);
 
     const newId = `custom-${Date.now()}`;
@@ -577,13 +517,11 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     setCustomThemeName(themeName);
     setThemeId(newId);
 
-    try {
-      localStorage.setItem('nb-saved-custom-themes', JSON.stringify(updatedList));
-      localStorage.setItem('nb-theme-id', newId);
-      localStorage.setItem('nb-custom-colors', JSON.stringify(colors));
-    } catch {}
+    writeStorage('nb-saved-custom-themes', JSON.stringify(updatedList));
+    writeStorage('nb-theme-id', newId);
+    writeStorage('nb-custom-colors', JSON.stringify(colors));
 
-    applyColorsToDOM(colors, isDark);
+    applyColorsToDOM(colors, isDark, false);
 
     return { success: true, themeName };
   };
@@ -594,13 +532,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     let colorsToExport = customColors;
     let darkStatus = isColorDark(customColors.bgApp);
 
-    if (THEME_PRESETS[idToExport as BuiltInThemeId]) {
-      const preset = THEME_PRESETS[idToExport as BuiltInThemeId];
+    const resolved = resolveThemeId(idToExport);
+    if (THEME_PRESETS[resolved as BuiltInThemeId]) {
+      const preset = THEME_PRESETS[resolved as BuiltInThemeId];
       exportName = preset.name;
       colorsToExport = preset.colors;
       darkStatus = preset.isDark;
     } else {
-      const saved = savedCustomThemes.find((t) => t.id === idToExport);
+      const saved = savedCustomThemes.find((t) => t.id === resolved);
       if (saved) {
         exportName = saved.name;
         colorsToExport = saved.colors;
@@ -665,16 +604,4 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
 
 export function useTheme() {
   return useContext(ThemeContext);
-}
-
-function isColorDark(hex: string): boolean {
-  if (!hex || !hex.startsWith('#')) return false;
-  const c = hex.substring(1);
-  const rgb = parseInt(c, 16);
-  if (isNaN(rgb)) return false;
-  const r = (rgb >> 16) & 0xff;
-  const g = (rgb >> 8) & 0xff;
-  const b = (rgb >> 0) & 0xff;
-  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-  return luma < 128;
 }

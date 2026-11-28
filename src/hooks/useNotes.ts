@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { db, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
+import { db, DEFAULT_MODULE_ID, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { deleteNoteWithTombstone, updateNoteSafely } from '@/lib/tombstones';
 
@@ -49,8 +49,13 @@ export function useNotes() {
       setNotes(all);
 
       try {
+        const urlParams = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+        const noteParam = urlParams?.get('note');
         const lastId = localStorage.getItem('nb-active-id');
-        if (lastId && all.some((n) => n.id === lastId)) {
+
+        if (noteParam && all.some((n) => n.id === noteParam)) {
+          updateActiveId(noteParam);
+        } else if (lastId && all.some((n) => n.id === lastId)) {
           updateActiveId(lastId);
         } else if (all.length > 0) {
           updateActiveId(all[0].id);
@@ -63,6 +68,21 @@ export function useNotes() {
     })();
   }, [updateActiveId]);
 
+  // Handle browser back / forward navigation via popstate
+  useEffect(() => {
+    const handlePopState = () => {
+      if (typeof window === 'undefined') return;
+      const params = new URLSearchParams(window.location.search);
+      const noteParam = params.get('note');
+      if (noteParam && notes.some((n) => n.id === noteParam)) {
+        updateActiveId(noteParam);
+        try { localStorage.setItem('nb-active-id', noteParam); } catch {}
+      }
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, [notes, updateActiveId]);
+
   const activeNote = useMemo(
     () => notes.find((n) => n.id === activeId) ?? null,
     [notes, activeId]
@@ -72,6 +92,13 @@ export function useNotes() {
   const selectNote = useCallback((id: string) => {
     updateActiveId(id);
     try { localStorage.setItem('nb-active-id', id); } catch {}
+    if (typeof window !== 'undefined' && window.location.pathname === '/') {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get('note') !== id) {
+        url.searchParams.set('note', id);
+        window.history.pushState({ noteId: id }, '', url.toString());
+      }
+    }
   }, [updateActiveId]);
 
   const createAndSelectNote = useCallback(
@@ -87,6 +114,9 @@ export function useNotes() {
         createdAt: now,
         updatedAt: now,
         contentHash,
+        moduleId: DEFAULT_MODULE_ID,
+        isArchived: false,
+        isPinned: false,
       };
       await db.notes.add(note);
       await reload();

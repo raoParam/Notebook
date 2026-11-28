@@ -639,7 +639,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         }
         .note-title-input:focus {
           border-color: var(--accent) !important;
-          box-shadow: 0 0 0 3px rgba(127, 168, 204, 0.18) !important;
+          box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent) !important;
           background: var(--bg-paper) !important;
         }
 

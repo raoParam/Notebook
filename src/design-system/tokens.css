@@ -1,0 +1,117 @@
+/*
+ * Notebook design tokens.
+ * ThemeProvider overrides palette variables at runtime. Components should
+ * consume semantic tokens below instead of defining their own colors.
+ */
+:root {
+  color-scheme: light;
+
+  /* Paper palette */
+  --bg-app: #F6F4EF;
+  --bg-paper: #FFFFFF;
+  --bg-sidebar: #EAE7DF;
+  --ink: #24241F;
+  --ink-soft: #5D5B53;
+  --ink-muted: #817D72;
+  --accent: #A65338;
+  --accent-soft: #C17A59;
+  --gold: #A58A55;
+  --border: #DAD6CC;
+  --danger: #A63D32;
+  --danger-hover: #842E27;
+  --hover: #E9E5DC;
+  --success: #397451;
+  --warning: #93651F;
+  --info: #596B61;
+  --code-bg: #24251F;
+  --code-ink: #F0EEE7;
+
+  /* Typography */
+  --font: 'Inter', sans-serif;
+  --serif-font: 'Source Serif 4', Georgia, serif;
+  --mono-font: 'JetBrains Mono', monospace;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-base: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.375rem;
+  --font-size-display: clamp(2.5rem, 6vw, 5.25rem);
+  --line-height-tight: 1.2;
+  --line-height-normal: 1.5;
+  --line-height-reading: 1.8;
+
+  /* Layout */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+  --space-12: 3rem;
+  --radius: 10px;
+  --radius-sm: 6px;
+  --radius-control: 8px;
+  --radius-panel: 12px;
+  --sidebar-width: 260px;
+  --header-height: 56px;
+
+  /* Elevation */
+  --shadow-sm: 0 1px 2px rgb(36 36 31 / 6%);
+  --shadow: 0 12px 28px rgb(36 36 31 / 10%);
+
+  /* Semantic aliases for application components */
+  --color-canvas: var(--bg-app);
+  --color-surface: var(--bg-paper);
+  --color-surface-muted: var(--bg-sidebar);
+  --color-surface-hover: var(--hover);
+  --color-text: var(--ink);
+  --color-text-secondary: var(--ink-soft);
+  --color-text-muted: var(--ink-muted);
+  --color-border: var(--border);
+  --color-border-strong: var(--ink-muted);
+  --color-action-primary: var(--accent);
+  --color-action-primary-hover: var(--accent-soft);
+  --color-action-primary-text: #FFFFFF;
+  --color-feedback-success: var(--success);
+  --color-feedback-warning: var(--warning);
+  --color-feedback-danger: var(--danger);
+  --color-feedback-info: var(--info);
+  --color-focus-ring: var(--accent);
+}
+
+.dark {
+  color-scheme: dark;
+  /* Ink palette */
+  --bg-app: #191B18;
+  --bg-paper: #22251F;
+  --bg-sidebar: #30342D;
+  --ink: #F0EEE7;
+  --ink-soft: #C0BDB2;
+  --ink-muted: #969489;
+  --accent: #C17A59;
+  --accent-soft: #D39473;
+  --gold: #C0A36B;
+  --border: #41443B;
+  --danger: #E08A7E;
+  --danger-hover: #EEA196;
+  --hover: #383B33;
+  --success: #83B395;
+  --warning: #D5B16D;
+  --info: #A6B5A9;
+  --code-bg: #11130F;
+  --code-ink: #F0EEE7;
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 24%);
+  --shadow: 0 12px 28px rgb(0 0 0 / 34%);
+  --color-action-primary-text: #191B18;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

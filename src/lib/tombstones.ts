@@ -332,7 +332,13 @@ export async function persistIncomingNote(
         return 'unchanged';
       }
 
-      await database.notes.put(note);
+      const noteToStore: Note = {
+        ...note,
+        ...(existing?.moduleId && !note.moduleId ? { moduleId: existing.moduleId } : {}),
+        ...(existing?.isArchived !== undefined && note.isArchived === undefined ? { isArchived: existing.isArchived } : {}),
+        ...(existing?.isPinned !== undefined && note.isPinned === undefined ? { isPinned: existing.isPinned } : {}),
+      };
+      await database.notes.put(noteToStore);
       return 'stored';
     }
   );
