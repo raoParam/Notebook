@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type { Note } from '@/lib/db';
 import { renderSafeMarkdown } from '@/lib/markdown';
 
@@ -9,7 +9,6 @@ interface MarkdownPreviewProps {
 }
 
 export function MarkdownPreview({ note }: MarkdownPreviewProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
   const [html, setHtml] = useState('');
 
   useEffect(() => {
@@ -26,7 +25,6 @@ export function MarkdownPreview({ note }: MarkdownPreviewProps) {
 
   return (
     <div
-      ref={containerRef}
       className="prose-notebook"
       style={{
         position: 'absolute',

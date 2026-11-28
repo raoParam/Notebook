@@ -80,9 +80,9 @@ export function SettingsModal({
     });
   };
 
-  const handleExportJSON = (targetId?: string) => {
+  const handleExportJSON = () => {
     try {
-      const { jsonString, filename } = exportThemeToJSON(targetId);
+      const { jsonString, filename } = exportThemeToJSON();
       const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
@@ -372,12 +372,7 @@ export function SettingsModal({
                             )}
                           </div>
 
-                          <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
-                            <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.bgApp, border: '1px solid var(--border)' }} title="App Background" />
-                            <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.bgSidebar, border: '1px solid var(--border)' }} title="Sidebar" />
-                            <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.accent }} title="Primary Accent" />
-                            <div style={{ width: 14, height: 14, borderRadius: '50%', background: preset.colors.gold }} title="Accent Gold" />
-                          </div>
+                          <ThemeSwatches colors={preset.colors} />
                         </div>
                       );
                     })}
@@ -460,12 +455,7 @@ export function SettingsModal({
                                 </div>
                               </div>
 
-                              <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
-                                <div style={{ width: 14, height: 14, borderRadius: '50%', background: theme.colors.bgApp, border: '1px solid var(--border)' }} title="App Background" />
-                                <div style={{ width: 14, height: 14, borderRadius: '50%', background: theme.colors.bgSidebar, border: '1px solid var(--border)' }} title="Sidebar" />
-                                <div style={{ width: 14, height: 14, borderRadius: '50%', background: theme.colors.accent }} title="Primary Accent" />
-                                <div style={{ width: 14, height: 14, borderRadius: '50%', background: theme.colors.gold }} title="Accent Gold" />
-                              </div>
+                              <ThemeSwatches colors={theme.colors} />
                             </div>
                           );
                         })}
@@ -757,7 +747,7 @@ export function SettingsModal({
                     </button>
 
                     <button
-                      onClick={() => handleExportJSON()}
+                      onClick={handleExportJSON}
                       title="Export Theme"
                       style={{
                         padding: '8px 14px',
@@ -1201,20 +1191,16 @@ export function SettingsModal({
   );
 }
 
-const actionHeaderBtnStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 5,
-  padding: '6px 10px',
-  fontSize: 12,
-  fontWeight: 500,
-  color: 'var(--ink)',
-  background: 'var(--bg-paper)',
-  border: '1px solid var(--border)',
-  borderRadius: 'var(--radius-sm)',
-  cursor: 'pointer',
-  transition: 'all 0.12s ease',
-};
+function ThemeSwatches({ colors }: { colors: ThemeColors }) {
+  return (
+    <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+      <div style={{ width: 14, height: 14, borderRadius: '50%', background: colors.bgApp, border: '1px solid var(--border)' }} title="App Background" />
+      <div style={{ width: 14, height: 14, borderRadius: '50%', background: colors.bgSidebar, border: '1px solid var(--border)' }} title="Sidebar" />
+      <div style={{ width: 14, height: 14, borderRadius: '50%', background: colors.accent }} title="Primary Accent" />
+      <div style={{ width: 14, height: 14, borderRadius: '50%', background: colors.gold }} title="Accent Gold" />
+    </div>
+  );
+}
 
 const navTabStyle: React.CSSProperties = {
   display: 'flex',

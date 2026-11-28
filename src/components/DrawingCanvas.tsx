@@ -49,10 +49,10 @@ export interface DrawingElement {
   opacity: number;
   text?: string;
   fontSize?: number;
-  fontFamily?: string;
 }
 
 type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'start' | 'end';
+type InteractionAction = 'drawing' | 'moving' | 'resizing' | 'panning' | 'marquee' | 'idle';
 
 const STROKE_COLORS = [
   { label: 'Black', value: '#1e1e1e' },
@@ -119,17 +119,7 @@ function pointInPolygon(p: Point, vs: Point[]): boolean {
 
 // Get tight bounding box of an element
 function getElementBounds(el: DrawingElement): { minX: number; minY: number; maxX: number; maxY: number } {
-  if (el.type === 'freedraw' && el.points && el.points.length > 0) {
-    const xs = el.points.map((p) => p.x);
-    const ys = el.points.map((p) => p.y);
-    return {
-      minX: Math.min(...xs),
-      minY: Math.min(...ys),
-      maxX: Math.max(...xs),
-      maxY: Math.max(...ys),
-    };
-  }
-  if ((el.type === 'line' || el.type === 'arrow') && el.points && el.points.length >= 2) {
+  if ((el.type === 'freedraw' || el.type === 'line' || el.type === 'arrow') && el.points && el.points.length > 0) {
     const xs = el.points.map((p) => p.x);
     const ys = el.points.map((p) => p.y);
     return {
@@ -178,6 +168,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
   // Canvas viewport: pan & zoom
   const [zoom, setZoom] = useState<number>(1);
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [isSpacePressed, setIsSpacePressed] = useState<boolean>(false);
   const isSpacePressedRef = useRef<boolean>(false);
   const panStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
 
@@ -188,8 +179,8 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
   const [historyIndex, setHistoryIndex] = useState<number>(0);
 
   // Interaction State
-  const [, setIsInteracting] = useState<boolean>(false);
-  const currentActionRef = useRef<'drawing' | 'moving' | 'resizing' | 'panning' | 'marquee' | 'idle'>('idle');
+  const [interactionAction, setInteractionAction] = useState<InteractionAction>('idle');
+  const currentActionRef = useRef<InteractionAction>('idle');
   const activeHandleRef = useRef<ResizeHandle | null>(null);
   const dragStartRef = useRef<Point>({ x: 0, y: 0 });
   const marqueeRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
@@ -218,18 +209,27 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
   const selectedElements = elements.filter((e) => selectedIds.includes(e.id));
   const primarySelected = selectedElements[0] || null;
 
-  // Sync primary selected element properties with active properties
-  useEffect(() => {
-    if (primarySelected) {
-      setStrokeColor(primarySelected.strokeColor);
-      setFillColor(primarySelected.fillColor);
-      setFillStyle(primarySelected.fillStyle);
-      setStrokeWidth(primarySelected.strokeWidth);
-      setStrokeStyle(primarySelected.strokeStyle);
-      setOpacity(primarySelected.opacity);
-      if (primarySelected.fontSize) setFontSize(primarySelected.fontSize);
-    }
-  }, [selectedIds]); // eslint-disable-line react-hooks/exhaustive-deps
+  const updateSelection = useCallback(
+    (nextIds: string[], sourceElements: DrawingElement[] = elements) => {
+      setSelectedIds(nextIds);
+      const primary = sourceElements.find((e) => e.id === nextIds[0]);
+      if (primary) {
+        setStrokeColor(primary.strokeColor);
+        setFillColor(primary.fillColor);
+        setFillStyle(primary.fillStyle);
+        setStrokeWidth(primary.strokeWidth);
+        setStrokeStyle(primary.strokeStyle);
+        setOpacity(primary.opacity);
+        if (primary.fontSize) setFontSize(primary.fontSize);
+      }
+    },
+    [elements]
+  );
+
+  const setActiveAction = useCallback((action: InteractionAction) => {
+    currentActionRef.current = action;
+    setInteractionAction(action);
+  }, []);
 
   // Push new state to history
   const pushHistory = useCallback((newElements: DrawingElement[]) => {
@@ -297,8 +297,8 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
 
     const next = [...elements, ...duplicates];
     pushHistory(next);
-    setSelectedIds(newSelectedIds);
-  }, [selectedIds, elements, pushHistory]);
+    updateSelection(newSelectedIds, next);
+  }, [selectedIds, elements, pushHistory, updateSelection]);
 
   // Update selected element property directly
   const updateSelectedProperty = useCallback(
@@ -398,13 +398,13 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
   }, []);
 
   // Get resize handles for a single selected element
-  const getHandles = useCallback((el: DrawingElement): Record<ResizeHandle, Point> | null => {
+  const getHandles = useCallback((el: DrawingElement): Partial<Record<ResizeHandle, Point>> | null => {
     if (el.type === 'line' || el.type === 'arrow') {
       if (!el.points || el.points.length < 2) return null;
       return {
         start: el.points[0],
         end: el.points[1],
-      } as any;
+      };
     }
 
     const { x, y, width, height } = el;
@@ -417,7 +417,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       s: { x: x + width / 2, y: y + height },
       sw: { x, y: y + height },
       w: { x, y: y + height / 2 },
-    } as any;
+    };
   }, []);
 
   // Hit test handles
@@ -700,6 +700,55 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
     render();
   }, [render]);
 
+  // Commit inline text element
+  const commitText = useCallback(() => {
+    if (!textEditor) return;
+    const trimmed = textEditor.text.trim();
+    if (trimmed) {
+      const fSize = textEditor.fontSize;
+      const lines = trimmed.split('\n');
+      const maxLineLen = Math.max(...lines.map((l) => l.length));
+      const width = Math.max(40, maxLineLen * (fSize * 0.6));
+      const height = lines.length * (fSize * 1.3);
+
+      if (textEditor.id) {
+        // Update existing text
+        const next = elements.map((el) =>
+          el.id === textEditor.id
+            ? { ...el, text: trimmed, width, height, strokeColor: textEditor.color, fontSize: fSize }
+            : el
+        );
+        pushHistory(next);
+      } else {
+        // Create new text element
+        const newEl: DrawingElement = {
+          id: generateId(),
+          type: 'text',
+          x: textEditor.worldX,
+          y: textEditor.worldY,
+          width,
+          height,
+          strokeColor: textEditor.color,
+          fillColor: 'transparent',
+          fillStyle: 'none',
+          strokeWidth: 2,
+          strokeStyle: 'solid',
+          opacity: 1,
+          text: trimmed,
+          fontSize: fSize,
+        };
+        const next = [...elements, newEl];
+        pushHistory(next);
+        updateSelection([newEl.id], next);
+      }
+    } else if (textEditor.id) {
+      // Removed text
+      const next = elements.filter((el) => el.id !== textEditor.id);
+      pushHistory(next);
+    }
+    setTextEditor(null);
+  }, [textEditor, elements, pushHistory, updateSelection]);
+
   // Keyboard Shortcuts Handler
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -714,6 +763,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       // Space for panning
       if (e.code === 'Space' && !e.repeat) {
         isSpacePressedRef.current = true;
+        setIsSpacePressed(true);
       }
 
       const ctrl = e.ctrlKey || e.metaKey;
@@ -800,6 +850,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
     const handleKeyUp = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
         isSpacePressedRef.current = false;
+        setIsSpacePressed(false);
       }
     };
 
@@ -809,55 +860,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedIds, textEditor, undo, redo, deleteSelected, duplicateSelected]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Commit inline text element
-  const commitText = useCallback(() => {
-    if (!textEditor) return;
-    const trimmed = textEditor.text.trim();
-    if (trimmed) {
-      const fSize = textEditor.fontSize;
-      const lines = trimmed.split('\n');
-      const maxLineLen = Math.max(...lines.map((l) => l.length));
-      const width = Math.max(40, maxLineLen * (fSize * 0.6));
-      const height = lines.length * (fSize * 1.3);
-
-      if (textEditor.id) {
-        // Update existing text
-        const next = elements.map((el) =>
-          el.id === textEditor.id
-            ? { ...el, text: trimmed, width, height, strokeColor: textEditor.color, fontSize: fSize }
-            : el
-        );
-        pushHistory(next);
-      } else {
-        // Create new text element
-        const newEl: DrawingElement = {
-          id: generateId(),
-          type: 'text',
-          x: textEditor.worldX,
-          y: textEditor.worldY,
-          width,
-          height,
-          strokeColor: textEditor.color,
-          fillColor: 'transparent',
-          fillStyle: 'none',
-          strokeWidth: 2,
-          strokeStyle: 'solid',
-          opacity: 1,
-          text: trimmed,
-          fontSize: fSize,
-        };
-        pushHistory([...elements, newEl]);
-        setSelectedIds([newEl.id]);
-      }
-    } else if (textEditor.id) {
-      // Removed text
-      const next = elements.filter((el) => el.id !== textEditor.id);
-      pushHistory(next);
-    }
-    setTextEditor(null);
-  }, [textEditor, elements, pushHistory]);
+  }, [selectedIds, textEditor, undo, redo, deleteSelected, duplicateSelected, commitText]);
 
   // Pointer Down Handler
   const handlePointerDown = useCallback(
@@ -872,22 +875,20 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
 
       // Spacebar or Middle Click -> Pan
       if (isSpacePressedRef.current || e.button === 1) {
-        currentActionRef.current = 'panning';
         panStartRef.current = { x: e.clientX - pan.x, y: e.clientY - pan.y };
-        setIsInteracting(true);
+        setActiveAction('panning');
         return;
       }
 
       // Eraser Mode: Erase clicked element or start drag erasing
       if (tool === 'eraser') {
-        currentActionRef.current = 'drawing';
+        setActiveAction('drawing');
         const hit = [...elements].reverse().find((el) => hitTestElement(world, el));
         if (hit) {
           const next = elements.filter((el) => el.id !== hit.id);
           pushHistory(next);
           setSelectedIds((prev) => prev.filter((id) => id !== hit.id));
         }
-        setIsInteracting(true);
         return;
       }
 
@@ -898,7 +899,6 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
           const singleEl = selectedElements[0];
           const handle = hitTestHandles(world, singleEl);
           if (handle) {
-            currentActionRef.current = 'resizing';
             activeHandleRef.current = handle;
             origElementsBoundsRef.current = [
               {
@@ -910,7 +910,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
                 points: singleEl.points ? [...singleEl.points] : undefined,
               },
             ];
-            setIsInteracting(true);
+            setActiveAction('resizing');
             return;
           }
         }
@@ -932,8 +932,8 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
             nextSelectedIds = [hit.id];
           }
 
-          setSelectedIds(nextSelectedIds);
-          currentActionRef.current = 'moving';
+          updateSelection(nextSelectedIds);
+          setActiveAction('moving');
 
           // Snapshot all currently selected elements for group drag
           const targets = elements.filter((el) => nextSelectedIds.includes(el.id));
@@ -945,16 +945,13 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
             height: el.height,
             points: el.points ? el.points.map((p) => ({ ...p })) : undefined,
           }));
-
-          setIsInteracting(true);
         } else {
           // Clicked empty canvas -> Start Marquee Area Selection!
           if (!e.shiftKey) {
             setSelectedIds([]);
           }
-          currentActionRef.current = 'marquee';
           marqueeRef.current = { x: world.x, y: world.y, width: 0, height: 0 };
-          setIsInteracting(true);
+          setActiveAction('marquee');
           render();
         }
         return;
@@ -977,8 +974,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       }
 
       // Shape or Freehand Drawing Creation
-      currentActionRef.current = 'drawing';
-      setIsInteracting(true);
+      setActiveAction('drawing');
 
       const baseElement: DrawingElement = {
         id: generateId(),
@@ -1026,6 +1022,8 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       pushHistory,
       commitText,
       render,
+      setActiveAction,
+      updateSelection,
     ]
   );
 
@@ -1054,7 +1052,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
 
         // Real-time highlight intersecting elements
         const enclosed = elements.filter((el) => elementIntersectsBox(el, { x: mx, y: my, width: mw, height: mh }));
-        setSelectedIds(enclosed.map((el) => el.id));
+        updateSelection(enclosed.map((el) => el.id));
         render();
         return;
       }
@@ -1160,7 +1158,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
         render();
       }
     },
-    [tool, selectedIds, selectedElements, elements, screenToWorld, hitTestElement, pushHistory, render]
+    [tool, selectedIds, selectedElements, elements, screenToWorld, hitTestElement, pushHistory, render, updateSelection]
   );
 
   // Pointer Up Handler
@@ -1190,10 +1188,9 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
       pushHistory(elements);
     }
 
-    currentActionRef.current = 'idle';
     activeHandleRef.current = null;
-    setIsInteracting(false);
-  }, [elements, pushHistory, render]);
+    setActiveAction('idle');
+  }, [elements, pushHistory, render, setActiveAction]);
 
   // Double Click Handler (for editing existing text element)
   const handleDoubleClick = useCallback(
@@ -1343,19 +1340,20 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
     onInsert(dataUrl);
   }, [elements, drawElement, onInsert]);
 
-  // Dynamic cursor style
-  const getCursor = () => {
-    if (isSpacePressedRef.current || currentActionRef.current === 'panning') return 'grab';
-    if (tool === 'select') {
-      if (activeHandleRef.current) return 'crosshair';
-      if (currentActionRef.current === 'moving') return 'move';
-      if (currentActionRef.current === 'marquee') return 'crosshair';
-      return 'default';
-    }
-    if (tool === 'eraser') return 'cell';
-    if (tool === 'text') return 'text';
-    return 'crosshair';
-  };
+  const cursor =
+    isSpacePressed || interactionAction === 'panning'
+      ? 'grab'
+      : tool === 'select'
+      ? interactionAction === 'moving'
+        ? 'move'
+        : interactionAction === 'resizing' || interactionAction === 'marquee'
+        ? 'crosshair'
+        : 'default'
+      : tool === 'eraser'
+      ? 'cell'
+      : tool === 'text'
+      ? 'text'
+      : 'crosshair';
 
   return (
     <div
@@ -2198,7 +2196,7 @@ export function DrawingCanvas({ onInsert, onClose }: DrawingCanvasProps) {
                 display: 'block',
                 width: '100%',
                 height: '100%',
-                cursor: getCursor(),
+                cursor,
                 touchAction: 'none',
               }}
               onPointerDown={handlePointerDown}

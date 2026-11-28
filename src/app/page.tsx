@@ -3,7 +3,6 @@
 import React, { useCallback, useState } from 'react';
 import { useNotes } from '@/hooks/useNotes';
 import { useSync } from '@/hooks/useSync';
-import { useTheme } from '@/components/ThemeProvider';
 import { Sidebar } from '@/components/Sidebar';
 import { Editor } from '@/components/Editor';
 import { PairDevice } from '@/components/PairDevice';
@@ -186,7 +185,7 @@ export default function NotebookPage() {
 
   const handleExportMd = useCallback(() => {
     if (!activeNote) return;
-    const content = resolveAttachments(activeNote);
+    const content = resolveSafeAttachments(activeNote.content, activeNote.attachments);
     const title = activeNote.title.trim() || 'untitled';
     const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' });
     const url = URL.createObjectURL(blob);
@@ -316,7 +315,6 @@ export default function NotebookPage() {
             onSortChange={changeSortOrder}
             onClose={() => setSidebarOpen(false)}
             connectedCount={connectedCount}
-            onOpenSettings={() => { setShowSettings(true); setSidebarOpen(false); }}
             onOpenPairDevice={() => { setShowPairDevice(true); setSidebarOpen(false); }}
           />
         </div>
@@ -455,11 +453,6 @@ const iconBtnStyle: React.CSSProperties = {
   transition: 'color 0.12s, background 0.12s',
   flexShrink: 0,
 };
-
-function resolveAttachments(note: Note): string {
-  if (!note.content) return note.content;
-  return resolveSafeAttachments(note.content, note.attachments);
-}
 
 function escHtml(s: string): string {
   const d = document.createElement('div');

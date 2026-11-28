@@ -1,12 +1,11 @@
 'use client';
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 export interface ToolbarProps {
   onCommand: (cmd: string) => void;
   onImageUpload: (file: File) => void;
   onToggleDrawing: () => void;
-  onOpenMd: () => void;
   onExportPdf: () => void;
   onExportMd: () => void;
   onToggleFullScreenWrite?: () => void;
@@ -15,7 +14,17 @@ export interface ToolbarProps {
   fullScreenMode?: 'none' | 'write' | 'preview';
 }
 
-const TOOLS = [
+interface ToolItem {
+  cmd: string;
+  title: string;
+  label?: string;
+  icon?: React.ReactNode;
+  style?: React.CSSProperties;
+}
+
+type ToolEntry = ToolItem | { sep: true };
+
+const TOOLS: readonly ToolEntry[] = [
   { cmd: 'bold',          label: 'B',    title: 'Bold (Ctrl+B)',        style: { fontWeight: 700, fontSize: 14 } },
   { cmd: 'italic',        label: 'I',    title: 'Italic (Ctrl+I)',      style: { fontStyle: 'italic', fontSize: 14 } },
   { cmd: 'strikethrough', label: 'S',    title: 'Strikethrough',        style: { textDecoration: 'line-through', fontSize: 13 } },
@@ -78,6 +87,10 @@ const TOOLS = [
   },
 ] as const;
 
+function isToolItem(entry: ToolEntry): entry is ToolItem {
+  return !('sep' in entry);
+}
+
 export function Toolbar({
   onCommand,
   onImageUpload,
@@ -94,31 +107,25 @@ export function Toolbar({
   const [showMoreModal, setShowMoreModal] = useState(false);
   const modalRef = useRef<HTMLDivElement>(null);
 
-  const handleImageChange = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      e.target.value = '';
-      if (!file) return;
-      onImageUpload(file);
-    },
-    [onImageUpload]
-  );
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    onImageUpload(file);
+  };
 
-  const handleMdImport = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (evt) => {
-        const text = evt.target?.result as string;
-        const title = file.name.replace(/\.md$/i, '');
-        onCommand(`__import__:${JSON.stringify({ title, content: text })}`);
-      };
-      reader.readAsText(file);
-      e.target.value = '';
-    },
-    [onCommand]
-  );
+  const handleMdImport = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      if (typeof evt.target?.result !== 'string') return;
+      const title = file.name.replace(/\.md$/i, '');
+      onCommand(`__import__:${JSON.stringify({ title, content: evt.target.result })}`);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -440,14 +447,14 @@ export function Toolbar({
 
             {/* Formatting Tools Grid */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-              {TOOLS.filter((t) => !('sep' in t)).map((item: any) => (
+              {TOOLS.filter(isToolItem).map((item) => (
                 <button
                   key={item.cmd}
                   onClick={() => { setShowMoreModal(false); onCommand(item.cmd); }}
                   style={mobileGridToolStyle}
                   title={item.title}
                 >
-                  <span style={{ fontSize: 14 }}>{'icon' in item ? item.icon : item.label}</span>
+                  <span style={{ fontSize: 14 }}>{item.icon ?? item.label}</span>
                   <span style={{ fontSize: 10, marginTop: 2, color: 'var(--ink-muted)' }}>{item.cmd.toUpperCase()}</span>
                 </button>
               ))}

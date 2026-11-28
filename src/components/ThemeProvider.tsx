@@ -3,7 +3,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 
 export type BuiltInThemeId = 'light' | 'dark' | 'ocean' | 'dracula' | 'nord' | 'gruvbox';
-export type ThemeId = string;
 
 export interface ThemeColors {
   bgApp: string;
@@ -242,18 +241,23 @@ function applyColorsToDOM(colors: ThemeColors, isDark: boolean) {
   root.style.setProperty('--accent-soft', colors.accentSoft);
   root.style.setProperty('--gold', colors.gold);
   root.style.setProperty('--border', colors.border);
-  root.style.setProperty('--border-light', colors.border);
   root.style.setProperty('--ink', colors.ink);
   root.style.setProperty('--ink-soft', colors.inkSoft);
   root.style.setProperty('--ink-muted', colors.inkMuted);
   root.style.setProperty('--hover', colors.hover);
   root.style.setProperty('--danger', colors.danger);
 
-  if (isDark) {
-    root.classList.add('dark');
-  } else {
-    root.classList.remove('dark');
-  }
+  root.classList.toggle('dark', isDark);
+}
+
+function writeStorage(key: string, value: string) {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function applyFontsToDOM(fonts: FontSettings) {
@@ -296,59 +300,74 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   };
 
   useEffect(() => {
-    try {
-      const savedThemeId = localStorage.getItem('nb-theme-id') || 'light';
-      const savedCustomColors = localStorage.getItem('nb-custom-colors');
-      const savedCustomListStr = localStorage.getItem('nb-saved-custom-themes');
-      const savedFonts = localStorage.getItem('nb-fonts');
+    let cancelled = false;
 
-      let loadedCustomList: CustomTheme[] = [];
-      if (savedCustomListStr) {
-        try {
-          loadedCustomList = JSON.parse(savedCustomListStr);
-          if (Array.isArray(loadedCustomList)) {
-            setSavedCustomThemes(loadedCustomList);
-          }
-        } catch {}
-      }
+    queueMicrotask(() => {
+      if (cancelled) return;
+      try {
+        const savedThemeId = localStorage.getItem('nb-theme-id') || 'light';
+        const savedCustomColors = localStorage.getItem('nb-custom-colors');
+        const savedCustomListStr = localStorage.getItem('nb-saved-custom-themes');
+        const savedFonts = localStorage.getItem('nb-fonts');
 
-      let loadedCustomColors = THEME_PRESETS.light.colors;
-      if (savedCustomColors) {
-        try {
-          loadedCustomColors = { ...THEME_PRESETS.light.colors, ...JSON.parse(savedCustomColors) };
-          setCustomColors(loadedCustomColors);
-        } catch {}
-      }
+        let loadedCustomList: CustomTheme[] = [];
+        if (savedCustomListStr) {
+          try {
+            const parsedList: unknown = JSON.parse(savedCustomListStr);
+            if (Array.isArray(parsedList)) {
+              loadedCustomList = parsedList as CustomTheme[];
+              setSavedCustomThemes(loadedCustomList);
+            }
+          } catch {}
+        }
 
-      let loadedFonts = DEFAULT_FONTS;
-      if (savedFonts) {
-        try {
-          const parsed = JSON.parse(savedFonts);
-          loadedFonts = {
-            uiFont: cleanFont(parsed.uiFont || DEFAULT_FONTS.uiFont),
-            serifFont: cleanFont(parsed.serifFont || DEFAULT_FONTS.serifFont),
-            monoFont: cleanFont(parsed.monoFont || DEFAULT_FONTS.monoFont),
-          };
-          setFonts(loadedFonts);
-        } catch {}
-      }
+        let loadedCustomColors = THEME_PRESETS.light.colors;
+        if (savedCustomColors) {
+          try {
+            const parsedColors: unknown = JSON.parse(savedCustomColors);
+            if (isPlainRecord(parsedColors)) {
+              loadedCustomColors = { ...THEME_PRESETS.light.colors, ...(parsedColors as Partial<ThemeColors>) };
+              setCustomColors(loadedCustomColors);
+            }
+          } catch {}
+        }
 
-      setThemeId(savedThemeId);
+        let loadedFonts = DEFAULT_FONTS;
+        if (savedFonts) {
+          try {
+            const parsedFonts: unknown = JSON.parse(savedFonts);
+            if (isPlainRecord(parsedFonts)) {
+              loadedFonts = {
+                uiFont: cleanFont(typeof parsedFonts.uiFont === 'string' ? parsedFonts.uiFont : DEFAULT_FONTS.uiFont),
+                serifFont: cleanFont(typeof parsedFonts.serifFont === 'string' ? parsedFonts.serifFont : DEFAULT_FONTS.serifFont),
+                monoFont: cleanFont(typeof parsedFonts.monoFont === 'string' ? parsedFonts.monoFont : DEFAULT_FONTS.monoFont),
+              };
+              setFonts(loadedFonts);
+            }
+          } catch {}
+        }
 
-      const activeSaved = loadedCustomList.find((t) => t.id === savedThemeId);
-      if (activeSaved) {
-        setCustomColors(activeSaved.colors);
-        setCustomThemeName(activeSaved.name);
-      } else if (THEME_PRESETS[savedThemeId as BuiltInThemeId]) {
-        const p = THEME_PRESETS[savedThemeId as BuiltInThemeId];
-        setCustomColors(p.colors);
-        setCustomThemeName(`My ${p.name} Custom`);
-      }
+        setThemeId(savedThemeId);
 
-      const activeData = getThemeData(savedThemeId, loadedCustomColors, loadedCustomList);
-      applyColorsToDOM(activeData.colors, activeData.isDark);
-      applyFontsToDOM(loadedFonts);
-    } catch {}
+        const activeSaved = loadedCustomList.find((t) => t.id === savedThemeId);
+        if (activeSaved) {
+          setCustomColors(activeSaved.colors);
+          setCustomThemeName(activeSaved.name);
+        } else if (THEME_PRESETS[savedThemeId as BuiltInThemeId]) {
+          const p = THEME_PRESETS[savedThemeId as BuiltInThemeId];
+          setCustomColors(p.colors);
+          setCustomThemeName(`My ${p.name} Custom`);
+        }
+
+        const activeData = getThemeData(savedThemeId, loadedCustomColors, loadedCustomList);
+        applyColorsToDOM(activeData.colors, activeData.isDark);
+        applyFontsToDOM(loadedFonts);
+      } catch {}
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const activeData = getThemeData(themeId, customColors, savedCustomThemes);
@@ -480,7 +499,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       };
     }
 
-    let parsed: any;
+    let parsed: unknown;
     try {
       parsed = JSON.parse(jsonString);
     } catch {
@@ -490,14 +509,14 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       };
     }
 
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    if (!isPlainRecord(parsed)) {
       return {
         success: false,
         error: 'The theme configuration structure is unrecognized. Please upload a valid theme file.',
       };
     }
 
-    const colorsObj = (parsed.colors && typeof parsed.colors === 'object') ? parsed.colors : parsed;
+    const colorsObj = isPlainRecord(parsed.colors) ? parsed.colors : parsed;
 
     const getVal = (primaryKey: string, altKey?: string): string => {
       const v = colorsObj[primaryKey] ?? (altKey ? colorsObj[altKey] : undefined);
@@ -607,17 +626,13 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
     const cleaned = cleanFont(value);
     const updated = { ...fonts, [key]: cleaned };
     setFonts(updated);
-    try {
-      localStorage.setItem('nb-fonts', JSON.stringify(updated));
-    } catch {}
+    writeStorage('nb-fonts', JSON.stringify(updated));
     applyFontsToDOM(updated);
   };
 
   const resetFonts = () => {
     setFonts(DEFAULT_FONTS);
-    try {
-      localStorage.setItem('nb-fonts', JSON.stringify(DEFAULT_FONTS));
-    } catch {}
+    writeStorage('nb-fonts', JSON.stringify(DEFAULT_FONTS));
     applyFontsToDOM(DEFAULT_FONTS);
   };
 

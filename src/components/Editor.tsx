@@ -176,86 +176,93 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
   };
 
   /* ── Markdown insertion helpers ── */
-  function insertAround(before: string, after: string, placeholder: string) {
-    const ta = taRef.current!;
-    if (!ta) return;
-    const { selectionStart: s, selectionEnd: e, value } = ta;
-    const selected = value.substring(s, e) || placeholder;
-    const next = value.slice(0, s) + before + selected + after + value.slice(e);
-    setContent(next);
-    ta.focus();
-    const pos = s + before.length + selected.length + after.length;
-    requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
-  }
+  const applyTextareaEdit = useCallback(
+    (
+      compute: (ta: HTMLTextAreaElement) => {
+        next: string;
+        selStart: number;
+        selEnd: number;
+      }
+    ) => {
+      const ta = taRef.current;
+      if (!ta) return;
+      const { next, selStart, selEnd } = compute(ta);
+      setContent(next);
+      ta.focus();
+      requestAnimationFrame(() => {
+        ta.value = next;
+        ta.setSelectionRange(selStart, selEnd);
+      });
+      scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
+    },
+    [scheduleUpdate]
+  );
+
+  const insertAround = useCallback(
+    (before: string, after: string, placeholder: string, selectInserted = false) => {
+      applyTextareaEdit((ta) => {
+        const { selectionStart: s, selectionEnd: e, value } = ta;
+        const selected = value.substring(s, e) || placeholder;
+        const next = value.slice(0, s) + before + selected + after + value.slice(e);
+        const selStart = selectInserted ? s + before.length : s + before.length + selected.length + after.length;
+        const selEnd = selectInserted ? s + before.length + selected.length : selStart;
+        return { next, selStart, selEnd };
+      });
+    },
+    [applyTextareaEdit]
+  );
 
   function insertAtLine(prefix: string) {
-    const ta = taRef.current!;
-    if (!ta) return;
-    const { selectionStart: s, value } = ta;
-    const lineStart = value.lastIndexOf('\n', s - 1) + 1;
-    const next = value.slice(0, lineStart) + prefix + value.slice(lineStart);
-    setContent(next);
-    ta.focus();
-    const pos = s + prefix.length;
-    requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
-  }
-
-  function insertFull(before: string, after: string, placeholder: string) {
-    const ta = taRef.current!;
-    if (!ta) return;
-    const { selectionStart: s, selectionEnd: e, value } = ta;
-    const selected = value.substring(s, e) || placeholder;
-    const next = value.slice(0, s) + before + selected + after + value.slice(e);
-    setContent(next);
-    ta.focus();
-    requestAnimationFrame(() => {
-      ta.value = next;
-      ta.setSelectionRange(s + before.length, s + before.length + selected.length);
+    applyTextareaEdit((ta) => {
+      const { selectionStart: s, value } = ta;
+      const lineStart = value.lastIndexOf('\n', s - 1) + 1;
+      const next = value.slice(0, lineStart) + prefix + value.slice(lineStart);
+      const pos = s + prefix.length;
+      return { next, selStart: pos, selEnd: pos };
     });
-    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
   }
 
   function insertText(text: string) {
-    const ta = taRef.current!;
-    if (!ta) return;
-    const { selectionStart: s, selectionEnd: e, value } = ta;
-    const before = s > 0 && value[s - 1] !== '\n' ? '\n' : '';
-    const after = value[e] && value[e] !== '\n' ? '\n' : '';
-    const next = value.slice(0, s) + before + text + after + value.slice(e);
-    setContent(next);
-    ta.focus();
-    const pos = s + before.length + text.length + after.length;
-    requestAnimationFrame(() => { ta.value = next; ta.setSelectionRange(pos, pos); });
-    scheduleUpdate({ title: draftRef.current.title, content: next }, 'content');
+    applyTextareaEdit((ta) => {
+      const { selectionStart: s, selectionEnd: e, value } = ta;
+      const before = s > 0 && value[s - 1] !== '\n' ? '\n' : '';
+      const after = value[e] && value[e] !== '\n' ? '\n' : '';
+      const next = value.slice(0, s) + before + text + after + value.slice(e);
+      const pos = s + before.length + text.length + after.length;
+      return { next, selStart: pos, selEnd: pos };
+    });
+  }
+
+  function insertAttachment(rawName: string, dataUrl: string) {
+    const targetNoteId = noteIdRef.current;
+    if (saveTimeout.current) {
+      clearTimeout(saveTimeout.current);
+      saveTimeout.current = null;
+    }
+    pendingSaveRef.current = null;
+    const attachments = { ...note.attachments };
+    const label = uniqueLabel(attachments, rawName);
+    attachments[label] = {
+      name: rawName,
+      data: dataUrl,
+      createdAt: new Date().toISOString(),
+    };
+    const curContent = draftRef.current.content;
+    const curTitle = draftRef.current.title;
+    const newContent =
+      curContent + (curContent && !curContent.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
+    draftRef.current = { title: curTitle, content: newContent };
+    dirtyFieldsRef.current = { title: false, content: false };
+    lastWrittenRef.current = { title: curTitle, content: newContent };
+    setContent(newContent);
+    onUpdate({ attachments, content: newContent, title: curTitle }, targetNoteId);
   }
 
   async function handleImageUpload(file: File) {
     setUploadError(null);
     try {
-      const targetNoteId = noteIdRef.current;
       const dataUrl = await processImageUpload(file);
-      if (saveTimeout.current) {
-        clearTimeout(saveTimeout.current);
-        saveTimeout.current = null;
-      }
-      pendingSaveRef.current = null;
-      const attachments = { ...note.attachments };
-      const label = uniqueLabel(attachments, file.name);
-      attachments[label] = {
-        name: file.name,
-        data: dataUrl,
-        createdAt: new Date().toISOString(),
-      };
-      const curContent = draftRef.current.content;
-      const curTitle = draftRef.current.title;
-      const newContent = curContent + (curContent && !curContent.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
-      draftRef.current = { title: curTitle, content: newContent };
-      dirtyFieldsRef.current = { title: false, content: false };
-      lastWrittenRef.current = { title: curTitle, content: newContent };
-      setContent(newContent);
-      onUpdate({ attachments, content: newContent, title: curTitle }, targetNoteId);
+      insertAttachment(file.name, dataUrl);
     } catch (err) {
       const message =
         err instanceof Error ? err.message : 'Could not add that image. Please try another file.';
@@ -265,27 +272,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
 
   function handleDrawingInsert(dataUrl: string) {
     setUploadError(null);
-    const targetNoteId = noteIdRef.current;
-    if (saveTimeout.current) {
-      clearTimeout(saveTimeout.current);
-      saveTimeout.current = null;
-    }
-    pendingSaveRef.current = null;
-    const attachments = { ...note.attachments };
-    const label = uniqueLabel(attachments, 'drawing');
-    attachments[label] = {
-      name: 'drawing',
-      data: dataUrl,
-      createdAt: new Date().toISOString(),
-    };
-    const curContent = draftRef.current.content;
-    const curTitle = draftRef.current.title;
-    const newContent = curContent + (curContent && !curContent.endsWith('\n') ? '\n' : '') + `![${label}]\n`;
-    draftRef.current = { title: curTitle, content: newContent };
-    dirtyFieldsRef.current = { title: false, content: false };
-    lastWrittenRef.current = { title: curTitle, content: newContent };
-    setContent(newContent);
-    onUpdate({ attachments, content: newContent, title: curTitle }, targetNoteId);
+    insertAttachment('drawing', dataUrl);
     setShowDrawing(false);
   }
 
@@ -306,7 +293,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
       ol: () => insertAtLine('1. '),
       quote: () => insertAtLine('> '),
       code: () => insertAround('```\n', '\n```', 'code block'),
-      link: () => insertFull('[', '](url)', 'link text'),
+      link: () => insertAround('[', '](url)', 'link text', true),
       hr: () => insertText('---'),
     };
     cmds[cmd]?.();
@@ -321,8 +308,7 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
     }
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [content, title]);
+  }, [insertAround]);
 
   const toggleFullScreenWrite = () => {
     setFullScreenMode((prev) => (prev === 'write' ? 'none' : 'write'));
@@ -385,7 +371,6 @@ export function Editor({ note, onUpdate, onImportNote, onExportPdf, onExportMd }
         onCommand={handleCommand}
         onImageUpload={handleImageUpload}
         onToggleDrawing={() => setShowDrawing((v) => !v)}
-        onOpenMd={() => {}}
         onExportPdf={onExportPdf}
         onExportMd={onExportMd}
         onToggleFullScreenWrite={toggleFullScreenWrite}

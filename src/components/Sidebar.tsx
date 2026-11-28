@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import type { Note } from '@/lib/db';
 import type { SortOrder } from '@/hooks/useNotes';
 
@@ -14,13 +14,14 @@ interface SidebarProps {
   onSortChange: (order: SortOrder) => void;
   onClose?: () => void;
   connectedCount: number;
-  onOpenSettings: () => void;
   onOpenPairDevice: () => void;
 }
 
 function formatDate(iso: string): string {
   const d = new Date(iso);
-  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return Number.isNaN(d.getTime())
+    ? iso
+    : d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 function stripMarkdown(s: string): string {
@@ -37,10 +38,8 @@ export function Sidebar({
   onSortChange,
   onClose,
   connectedCount,
-  onOpenSettings,
   onOpenPairDevice,
 }: SidebarProps) {
-  const listRef = useRef<HTMLDivElement>(null);
 
   return (
     <aside
@@ -152,10 +151,7 @@ export function Sidebar({
       </div>
 
       {/* Notes list */}
-      <div
-        ref={listRef}
-        style={{ flex: 1, overflowY: 'auto', padding: '6px 6px' }}
-      >
+      <div style={{ flex: 1, overflowY: 'auto', padding: '6px 6px' }}>
         {notes.length === 0 ? (
           <p style={{ padding: '20px 12px', textAlign: 'center', fontSize: 13, color: 'var(--ink-muted)' }}>
             No notes yet. Create one!

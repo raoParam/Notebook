@@ -625,21 +625,6 @@ export function computeManifestDigest(manifest: ManifestEntry[]): string {
     .join('|');
 }
 
-/** Diff result describing what to request from the peer */
-export interface SyncDiff {
-  /** Note IDs to request full data for (missing locally or peer is newer) */
-  toRequest: string[];
-  /** Notes to send to peer (we are newer or peer is missing them) — determined by peer's diff */
-  toSend: string[];
-}
-
-/** Result of a completed sync operation */
-export interface SyncResult {
-  received: number;
-  sent: number;
-  unchanged: number;
-}
-
 /**
  * Compare local manifest against peer's manifest.
  * Returns the IDs we need to request from the peer.

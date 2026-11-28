@@ -188,6 +188,17 @@ function deletionAckKey(pairingId: string, peerId: string, deletionId: string): 
   return `${peerCompositeKey(pairingId, peerId)}\x00${deletionId}`;
 }
 
+function isPeerRunComplete(peerRun: PeerRunState): boolean {
+  return (
+    peerRun.disconnected ||
+    (peerRun.outboundRequestReceived &&
+      !peerRun.outboundSendingInProgress &&
+      peerRun.inboundManifestReceived &&
+      peerRun.pendingOutgoing.size === 0 &&
+      peerRun.pendingIncomingIds.size === 0)
+  );
+}
+
 export function useSync(onNotesChanged: () => void) {
   const [pairings, setPairings] = useState<Pairing[]>([]);
   const [connectedPeers, setConnectedPeers] = useState<PeerState[]>([]);
@@ -627,15 +638,7 @@ export function useSync(onNotesChanged: () => void) {
       let allDone = true;
 
       for (const peerRun of run.peers.values()) {
-        if (
-          !peerRun.done &&
-          (peerRun.disconnected ||
-            (peerRun.outboundRequestReceived &&
-              !peerRun.outboundSendingInProgress &&
-              peerRun.inboundManifestReceived &&
-              peerRun.pendingOutgoing.size === 0 &&
-              peerRun.pendingIncomingIds.size === 0))
-        ) {
+        if (!peerRun.done && isPeerRunComplete(peerRun)) {
           peerRun.done = true;
         }
 
@@ -709,15 +712,7 @@ export function useSync(onNotesChanged: () => void) {
     const peerRun = autoRun.peer;
     if (autoRun.settled || autoRunsRef.current.get(peerRun.key) !== autoRun) return;
 
-    const isDone =
-      peerRun.disconnected ||
-      (peerRun.outboundRequestReceived &&
-        !peerRun.outboundSendingInProgress &&
-        peerRun.inboundManifestReceived &&
-        peerRun.pendingOutgoing.size === 0 &&
-        peerRun.pendingIncomingIds.size === 0);
-
-    if (!isDone) return;
+    if (!isPeerRunComplete(peerRun)) return;
 
     peerRun.done = true;
     autoRun.settled = true;
@@ -2458,6 +2453,5 @@ export function useSync(onNotesChanged: () => void) {
     addPairing,
     removePairing,
     triggerSync,
-    setSyncStatus,
   };
 }

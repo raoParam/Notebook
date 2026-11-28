@@ -1,11 +1,15 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { db, type DeletionRecipient, type Note, type Tombstone } from '@/lib/db';
 import { computeContentHash } from '@/lib/hash';
 import { deleteNoteWithTombstone, updateNoteSafely } from '@/lib/tombstones';
 
 export type SortOrder = 'lastChange' | 'ascending' | 'descending';
+
+function isSortOrder(value: string | null): value is SortOrder {
+  return value === 'lastChange' || value === 'ascending' || value === 'descending';
+}
 
 function sortNotes(notes: Note[], order: SortOrder): Note[] {
   const copy = [...notes];
@@ -15,7 +19,6 @@ function sortNotes(notes: Note[], order: SortOrder): Note[] {
   if (order === 'descending') {
     return copy.sort((a, b) => (b.title || '').localeCompare(a.title || ''));
   }
-  // lastChange
   return copy.sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
   );
@@ -27,7 +30,6 @@ export function useNotes() {
   const [sortOrder, setSortOrder] = useState<SortOrder>('lastChange');
   const [isLoaded, setIsLoaded] = useState(false);
 
-  // Load notes from IndexedDB
   const reload = useCallback(async () => {
     const all = await db.notes.toArray();
     setNotes(all);
@@ -40,7 +42,6 @@ export function useNotes() {
       const all = await db.notes.toArray();
       setNotes(all);
 
-      // Restore last active note from localStorage
       try {
         const lastId = localStorage.getItem('nb-active-id');
         if (lastId && all.some((n) => n.id === lastId)) {
@@ -48,58 +49,64 @@ export function useNotes() {
         } else if (all.length > 0) {
           setActiveId(all[0].id);
         }
-        const savedSort = localStorage.getItem('nb-sort') as SortOrder | null;
-        if (savedSort) setSortOrder(savedSort);
+        const savedSort = localStorage.getItem('nb-sort');
+        if (isSortOrder(savedSort)) setSortOrder(savedSort);
       } catch {}
 
       setIsLoaded(true);
     })();
   }, []);
 
-  const activeNote = notes.find((n) => n.id === activeId) ?? null;
-  const sortedNotes = sortNotes(notes, sortOrder);
+  const activeNote = useMemo(
+    () => notes.find((n) => n.id === activeId) ?? null,
+    [notes, activeId]
+  );
+  const sortedNotes = useMemo(() => sortNotes(notes, sortOrder), [notes, sortOrder]);
 
   const selectNote = useCallback((id: string) => {
     setActiveId(id);
     try { localStorage.setItem('nb-active-id', id); } catch {}
   }, []);
 
-  const addNote = useCallback(async () => {
-    const now = new Date().toISOString();
-    const attachments = {};
-    const contentHash = await computeContentHash('', attachments);
-    const note: Note = {
-      id: crypto.randomUUID(),
-      title: '',
-      content: '',
-      attachments,
-      createdAt: now,
-      updatedAt: now,
-      contentHash,
-    };
-    await db.notes.add(note);
-    await reload();
-    setActiveId(note.id);
-    try { localStorage.setItem('nb-active-id', note.id); } catch {}
-    return note.id;
-  }, [reload]);
+  const createAndSelectNote = useCallback(
+    async (title: string, content: string) => {
+      const now = new Date().toISOString();
+      const attachments = {};
+      const contentHash = await computeContentHash(content, attachments);
+      const note: Note = {
+        id: crypto.randomUUID(),
+        title,
+        content,
+        attachments,
+        createdAt: now,
+        updatedAt: now,
+        contentHash,
+      };
+      await db.notes.add(note);
+      await reload();
+      setActiveId(note.id);
+      try { localStorage.setItem('nb-active-id', note.id); } catch {}
+      return note.id;
+    },
+    [reload]
+  );
+
+  const addNote = useCallback(() => createAndSelectNote('', ''), [createAndSelectNote]);
 
   const deleteNote = useCallback(
     async (id: string, recipients?: DeletionRecipient[]): Promise<Tombstone | null> => {
       const tombstone = await deleteNoteWithTombstone(id, db, recipients);
       if (!tombstone) return null;
-      setNotes((prev) => {
-        const next = prev.filter((n) => n.id !== id);
-        if (activeId === id) {
-          const newActive = next.length > 0 ? next[0].id : null;
-          setActiveId(newActive);
-          try { localStorage.setItem('nb-active-id', newActive ?? ''); } catch {}
-        }
-        return next;
-      });
+      const remaining = notes.filter((n) => n.id !== id);
+      setNotes((prev) => prev.filter((n) => n.id !== id));
+      if (activeId === id) {
+        const newActive = remaining.length > 0 ? remaining[0].id : null;
+        setActiveId(newActive);
+        try { localStorage.setItem('nb-active-id', newActive ?? ''); } catch {}
+      }
       return tombstone;
     },
-    [activeId]
+    [activeId, notes]
   );
 
   const updateNote = useCallback(
@@ -116,25 +123,10 @@ export function useNotes() {
     try { localStorage.setItem('nb-sort', order); } catch {}
   }, []);
 
-  const importNote = useCallback(async (title: string, content: string) => {
-    const now = new Date().toISOString();
-    const attachments = {};
-    const contentHash = await computeContentHash(content, attachments);
-    const note: Note = {
-      id: crypto.randomUUID(),
-      title,
-      content,
-      attachments,
-      createdAt: now,
-      updatedAt: now,
-      contentHash,
-    };
-    await db.notes.add(note);
-    await reload();
-    setActiveId(note.id);
-    try { localStorage.setItem('nb-active-id', note.id); } catch {}
-    return note.id;
-  }, [reload]);
+  const importNote = useCallback(
+    (title: string, content: string) => createAndSelectNote(title, content),
+    [createAndSelectNote]
+  );
 
   return {
     notes: sortedNotes,

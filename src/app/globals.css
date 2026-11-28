@@ -13,7 +13,6 @@
   --accent-soft: #3D5A78;
   --gold: #AD8A4E;
   --border: #DEDAD0;
-  --border-light: #DEDAD0;
   --danger: #A23B2E;
   --danger-hover: #7F2D24;
   --hover: #E6E2D9;
@@ -39,7 +38,6 @@
   --accent-soft: #9CC0E0;
   --gold: #D4AF6A;
   --border: #2A2F37;
-  --border-light: #2A2F37;
   --danger: #E0796A;
   --danger-hover: #F0968A;
   --hover: #22262E;
@@ -84,7 +82,7 @@ body, header, aside, main, section, nav {
   }
 }
 
-#__next, body > div:first-child {
+body > div:first-child {
   height: 100%;
 }
 
@@ -104,7 +102,6 @@ body, header, aside, main, section, nav {
 ::-webkit-scrollbar-thumb { background: #C9C3B6; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--gold); }
 .dark ::-webkit-scrollbar-thumb { background: #3A3F47; }
-.dark ::-webkit-scrollbar-thumb:hover { background: var(--gold); }
 
 /* ─── Markdown Preview ──────────────────────────────── */
 .prose-notebook {

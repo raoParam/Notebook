@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { generateRoomCode } from '@/lib/hash';
 import type { Pairing } from '@/lib/db';
 
@@ -28,11 +28,32 @@ export function PairDevice({
   const [enterLabel, setEnterLabel] = useState('');
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
+  const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+    };
+  }, []);
+
+  function switchView(nextView: PairView) {
+    setMsg('');
+    setView(nextView);
+  }
+
+  function scheduleReturnToMenu() {
+    if (resetTimerRef.current !== null) clearTimeout(resetTimerRef.current);
+    resetTimerRef.current = setTimeout(() => {
+      resetTimerRef.current = null;
+      setMsg('');
+      setView('menu');
+    }, 2500);
+  }
 
   function handleGenerate() {
     setGeneratedCode(generateRoomCode());
     setLabel('');
-    setView('generate');
+    switchView('generate');
   }
 
   async function handleSaveGenerated() {
@@ -42,7 +63,7 @@ export function PairDevice({
       await onAddPairing(generatedCode, label.trim());
       setMsg('Pairing saved! Share the code with the other device.');
       setLabel('');
-      setTimeout(() => { setMsg(''); setView('menu'); }, 2500);
+      scheduleReturnToMenu();
     } catch {
       setMsg('Failed to save pairing.');
     } finally {
@@ -61,7 +82,7 @@ export function PairDevice({
       setMsg('Connected! Pairing saved.');
       setEnterCode('');
       setEnterLabel('');
-      setTimeout(() => { setMsg(''); setView('menu'); }, 2500);
+      scheduleReturnToMenu();
     } catch {
       setMsg('Failed to save pairing.');
     } finally {
@@ -107,7 +128,7 @@ export function PairDevice({
                 Generate Code<br />
                 <small style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>This device starts pairing</small>
               </PairBtn>
-              <PairBtn onClick={() => setView('enter')} icon="🔑">
+              <PairBtn onClick={() => switchView('enter')} icon="🔑">
                 Enter Code<br />
                 <small style={{ fontWeight: 400, color: 'var(--ink-soft)' }}>Join an existing pairing</small>
               </PairBtn>
@@ -202,7 +223,7 @@ export function PairDevice({
               </button>
             </div>
             <label style={labelStyle}>
-              Name this pairing (e.g. "My Phone")
+              Name this pairing (e.g. &ldquo;My Phone&rdquo;)
               <input
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
@@ -214,7 +235,7 @@ export function PairDevice({
             </label>
             {msg && <p style={{ fontSize: 12, color: msg.includes('saved') ? '#22c55e' : 'var(--danger)' }}>{msg}</p>}
             <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => setView('menu')} style={cancelBtnStyle}>Back</button>
+              <button onClick={() => switchView('menu')} style={cancelBtnStyle}>Back</button>
               <button onClick={handleSaveGenerated} disabled={loading} style={primaryBtnStyle}>
                 {loading ? 'Saving…' : 'Save Pairing'}
               </button>
@@ -250,7 +271,7 @@ export function PairDevice({
             </label>
             {msg && <p style={{ fontSize: 12, color: msg.includes('saved') || msg.includes('Connected') ? '#22c55e' : 'var(--danger)' }}>{msg}</p>}
             <div style={{ display: 'flex', gap: 8 }}>
-              <button onClick={() => setView('menu')} style={cancelBtnStyle}>Back</button>
+              <button onClick={() => switchView('menu')} style={cancelBtnStyle}>Back</button>
               <button onClick={handleEnterCode} disabled={loading} style={primaryBtnStyle}>
                 {loading ? 'Joining…' : 'Join Room'}
               </button>
